@@ -5,6 +5,9 @@ description: "This post is used for validating if duplicate tags are removed, re
 tags: ["blog", "blog", "Blog", "test", "bloG", "Test", "BLOG"]
 ---
 
+
+If this is working correctly, this post should only be accessible in a dev environment, as well as any tags that are unique to this post.
+
 ## This post is to test zod transform
 
 If you open the file `src/content/post/unique-tags.md`, the tags array has a number of duplicate blog strings of various cases.
