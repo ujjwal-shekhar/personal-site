@@ -1,8 +1,8 @@
 ---
 title: "TCP/IP illustrated notes + Linux network tooling"
 description: "My notes from working through the TCP/IP illustrated book and rabbit hole digging into linux tooling for networks"
-publishDate: "27 Nov 2025"
-updatedDate: "27 Nov 2025"
+publishDate: "23 Oct 2025"
+updatedDate: "26 Oct 2025"
 tags: ["tcp/ip", "linux", "udp", "network-tooling"]
 pinned: true
 ---

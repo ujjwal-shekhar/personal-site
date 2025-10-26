@@ -1,8 +1,8 @@
 ---
 title: "Inside the Machine notes + Digging into my laptop's hardware"
 description: "My notes from a working through the Inside the Machine book by Jon Stokes and rabbit hole into figuring out my Ryzen chip's design decisions"
-publishDate: "27 Nov 2025"
-updatedDate: "27 Nov 2025"
+publishDate: "25 Oct 2025"
+updatedDate: "26 Oct 2025"
 tags: ["superscalar", "microprocessors", "pipelining", "comp-arch"]
 pinned: true
 ---

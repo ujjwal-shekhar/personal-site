@@ -1,8 +1,8 @@
 ---
 title: "Notes from the Master's Course in C++ (MIPT, 2025-2026)"
 description: "An advanced deep dive into a lot of the C++ internals. I also work out all the assignments here."
-publishDate: "27 Nov 2025"
-updatedDate: "27 Nov 2025"
+publishDate: "26 Oct 2025"
+updatedDate: "26 Oct 2025"
 tags: ["c++", "compilers", "lang-features"]
 pinned: true
 ---
