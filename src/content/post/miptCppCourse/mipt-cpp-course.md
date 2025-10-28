@@ -259,7 +259,53 @@ int foo_ok(int *a, int base, int off) {
 
 ### Extra essential viewing
 
+:::note
+At some point I realized that I wasn't very clear on the specific behavior of signed and unsigned overflows while watching Chandler's talk, I took a detour with the [blog on overflow by Ian](https://www.airs.com/blog/archives/120)
+:::
+
+#### Rabbit hole: Ian's blog on overflow and some more digging
+
+> [Read it here](https://www.airs.com/blog/archives/120)
+
+Signed integer overflow is considered UB by the standard. So, a C/C++ program that contains signed overflow is considered wrong. Thus, the compiler is free to assume that a given program will not contain signed integer overflow, and if it does anything can be done to it. OTOH, unsigned integer overflow is indeed defined behavior.
+
+*But... why? they are either BOTH UB or BOTH IB/DB right?* No, there are a few caveats with the treatment of a signed integer. Different processors treat signed integer representation of a binary differently. Some use the 2's complement method, while some use 1's complement. Thus, the language standard cannot define a set behavior on signed overflow if the underlying hardware changes. With the unsigned integer, it is obvious that the same bit representation will be treated exactly the same across machines. Thus, overflow can be treated as a "wrap around" (modulo MAX + 1).
+
+*No chance that we can define the signed integer overflow behavior?* Nope, the hardware differences are too wide. By fixing the behavior to one style, we would be antagonizing the users of hardware that is non-conformant to the standard. Plus, far too many optimizations exist due to UB which would otherwise be completely lost. For example here, `if (i + 1 < i) { ... }  // always false if overflow can't happen` can be replaced by the compiler to be `false` directly. If you use flags like `-fwrapv` or `-fno-strict-overflow` then indeed the behavior is fixed at a performance cost. Use builtins like `__builtin_add_overflow(a, b, &result)` (detect overflow safely).
+
 #### CppCon 2016: Chandler Carruth “Garbage In, Garbage Out: Arguing about Undefined Behavior..."
+
+> [Watch it on YouTube here](https://www.youtube.com/watch?v=yG1OZ69H_-o)
+
+:::tip
+The summary of the first half of the talk is essentially that *UB is NOT a compiler bug, it is a human violation of the contracts provided by the standard.
+:::
+
+That's it, we must start treating UB as a lack of the user's (programmer's) lack of knowledge about the working of the language. When they break the contract that the language provides (e.g: dereference a null pointer), they made that error, and as specified by the standard, all bets are off. Sure, UB *could* allow the compiler to optimize the generated asm, but it is still a valid behaviour even if the final behaviour of the code is not what the user wanted.
+
+### Okay then, lets widen all of our contracts and define all behavior
+
+#### Define all behavior
+
+This problem is simply intractable. consider a function `Node findSink( const vector<Node*>& graph )`. If this is defined in a way that recurses to find a node that is a sink, then upon being given a graph which is cyclic any of the following could happen:
+
+- The recursion forces the stack to grow to an overflow, and it gets killed by the OS
+- The implementation is optimizable to a tail recursion, which causes there to be an infinite loop.
+- Some node pointer corrupts due to the growing stack and a dereference goes on to hit a guarded page, leading to a segfault.
+
+Can you define this behaviour? No you cannot, it has to be platform/hardware/compiler defined. Matter of fact, all three cases are (usually) possible to hit in most cases so the result is non-deterministic across different runs of the binary. Remember, UB does not guarantee consistent behaviour across runs -- all bets are off.
+
+#### Widen all contracts
+
+In the previous example, the only way to do that would be to add a runtime pre-condition contract that first processes the graph to find a cycle. This needs extra memory, this needs extra runtime performance cost. Not all users are going to be happy with that. In fact, such a pre-condition might be essentially impossible to write. To add a pre-condition that disallows inputs going into an infinite loop is reducible to solving the halting problem. So, we are stuck with a logical bottleneck to eliminating UB.
+
+### Pay for what you use: Narrow contracts when we need them, are okay
+
+Principles for narrow contracts:
+
+- Checkable (probabilistically) at runtime
+- Provides immense value as a trade-off
+- Should not break existing code (or coding practices that are widely accepted)
 
 TBD
 
