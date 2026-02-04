@@ -17,7 +17,7 @@ Some jargon that is always thrown around with cpp:
 
 - General purpose a.k.a. the second best language for everything ;)
 - Statically typed (tbd) 
-- Statically compiled; the compiled to machine code file is end all be all
+- Statically compiled: the compiled -> machine code file is end all be all
 
 The language standard is NOT the final approach to implementation, it ONLY guarantees the translation. It is an agreement between the compiler devs (producers of the language translation implmentation: gcc, clang, msvc..) and the programmers (consumers of the compiler!). Thus, the language standard either translates the program or issues a diagnostic, it should not act like a static analyzer and freely issue false positives.
 
@@ -53,7 +53,7 @@ int find_msb(MSB_TYPE msb) {
 
 Besides, a use of macro here implies that the either us (the programmers) or the language standards (the compiler devs) have missed something... which takes us to the next vector of development **compiler instrinsics to standard implementation**.
 
-Subtle, but the entire reason why something like `__builtin_clz` exists as a compiler/machine dependent behaviour is that it is useful. It is a natural for the programmer to expect from the compiler dev that this feature become a standard language feature instead i.e., from `__builtin_clz` to `template<class T> countl_zero`. Note that the `countl_zero` function can only accept unsigned types. We get:
+Subtle, but the entire reason why something like `__builtin_clz` exists as a compiler/machine dependent behaviour is that it is useful. It is a natural next step for the programmer to expect from the compiler dev that this feature become a standard language feature instead i.e., from `__builtin_clz` to `template<class T> countl_zero`. Note that the `countl_zero` function can only accept unsigned types. We get:
 
 ```cpp
 template<typename T>
@@ -77,7 +77,7 @@ int find_msb(std::integral auto value) {
 ```
 
 :::note
-Notice that this version still has some type deduction machinery (`auto` uses the template type deduction machinery inside the compiler anyways!), just that we increase and restrict the domain of the incoming input types. Cleanly imposes requirements on by adding a layer of indirection.
+Notice that this version still has some type deduction machinery (`auto` uses the template type deduction machinery inside the compiler anyways!), just that we increase (but continue to restrict) the domain of the incoming input types. Cleanly imposes requirements on the incoming type by adding a layer of indirection.
 :::
 
 ### Users can insert UB for compiler opts as well (+contracts FTW)
@@ -109,7 +109,7 @@ pre(value != 0)
 - Is not defined everywhere (yay, UB)
 - Parameterized. That is, compiler/machine specific behavior of some functionality of the abstract machine must be defined by the compiler devs.
 
-Compiler uses them for optimizations mostly on the basis of there being no side-effects
+Compiler uses these properties for optimizations mostly on the basis of there being no side-effects
 
 :::important[The so called "as-if" rule]
 More formally, the compiler can do anything as long as the observable behavior of the abstract machine (program) does not change. This is a necessary condition but not sufficient.
@@ -141,7 +141,7 @@ You can usually think about this by ascertaining if something *could be* assigne
 
 If UB exists in code, not only does the compiler turn blind to that specific LOC, it is free to do anything in the code preceding the location of UB. It can remove everything and consequently lead to an infinite loop as shown below.
 
-This responsibility is on the programmer ONLY, since they have assured the programmer that this is UB and that they guarantee that this UB will never be triggered. Thus an *as-if* behavior is triggered that makes the compiler act as if the UB is never reached. Also, [fun stuff linked here](https://lore.kernel.org/llvm/20250426200513.GA427956@ax162/).
+This responsibility is on the programmer ONLY, since they have assured the compiler that this is UB and that they guarantee that this UB will never be triggered. Thus an *as-if* behavior is triggered that makes the compiler act as if the UB is never reached. Also, [fun stuff linked here](https://lore.kernel.org/llvm/20250426200513.GA427956@ax162/).
 
 :::important
 For the compiler, UB doesn't exist. So if something goes wrong, then the responsibily is on the programmer. The compiler will usually follow a simple mechanism and remove the entire path leading upto UB by assuming that it is unreachable. This will either happen due to the as-if rule seeing no side-effects or because it is on the path to UB.
@@ -176,7 +176,7 @@ unsigned char f = e; // EB, but now f gets "erroneous value"
 assert(e == f); // This evaluates to true since both are erroneous
 ```
 
-Note that in the above example, `c` still gets optimized due to the UBness of `b` in the next line `char d = b + 1`; NOT by any fault of `a` or `c` being undefined/assigned to undefined. EB is allowed to be done, AND recommended by the compiler to diagnose, garbage in garbage out.
+Note that in the above example, `c` can still get optimized away due to the UBness of `b` in the next line `char d = b + 1`; NOT by any fault of `a` or `c` (being undefined/assigned to undefined). EB is allowed to be done, AND recommended by the compiler to diagnose, garbage in garbage out.
 
 ### Homework
 
@@ -281,7 +281,7 @@ Signed integer overflow is considered UB by the standard. So, a C/C++ program th
 The summary of the first half of the talk is essentially that *UB is NOT a compiler bug, it is a human violation of the contracts provided by the standard.
 :::
 
-That's it, we must start treating UB as a lack of the user's (programmer's) lack of knowledge about the working of the language. When they break the contract that the language provides (e.g: dereference a null pointer), they made that error, and as specified by the standard, all bets are off. Sure, UB *could* allow the compiler to optimize the generated asm, but it is still a valid behaviour even if the final behaviour of the code is not what the user wanted.
+That's it, we must start treating UB as a lack of the user's (read: programmer's) knowledge about the working of the language. When they break the contract that the language provides (e.g: dereference a null pointer), they made that error, and as specified by the standard, all bets are off. Sure, UB *could* allow the compiler to optimize the generated asm. However, it is still a valid behaviour even if the final behaviour of the code is not what the user wanted.
 
 ### Okay then, lets widen all of our contracts and define all behavior
 
@@ -310,5 +310,206 @@ Principles for narrow contracts:
 TBD
 
 #### CppCon 2017: Piotr Padlewski “Undefined Behaviour is awesome!”
+
+TBD
+
+## Lecture 2: Strings
+
+:::tip
+THE best and greatest example of generic programming are string...
+:::
+
+### History
+
+Whether you write a "hello world" program in 2025, in the most bleeding edge module and `std::print` syntax or in the 1983 `std::printf` version; the string literal continues to remain common. In fact, the C-style string literals put withing double quotes are used till date. Why?
+
+### What are strings exactly?
+
+Initially, the notion to "pass" strings around would require some way of knowing what the string was. Imagine encoding strings with their length attached as a prefix to them. This would require some kind of a compiler magic type that would define the interaction of this string type with all other types in the standard.
+
+Instead, the compiler devs of the time came up with a brilliant idea. Null-terminated strings and treating string literals as `const char*`. In fact, EVERY suffix of the string was automatically another `const char *` by design, and this only took one extra character worth of memory to null-terminate itself thus, not requiring a prefix-ed length. This solution is really cool, there are often caveats like the one shown below.
+
+```cpp
+auto t = "Hello, World";
+static_assert(sizeof(t) == 8); // t is a const char *
+static_assert(sizeof("Hello, World") == 14); // the passed in thing is a null-terminated string literal
+// This is because the string literal would be stored as an array of bytes in the .rodata section of
+// the code. The sizeof thus finds the number of elements present in this array including the null-term
+// When we store the const char* in a variable the variable can simply point to it now.
+```
+
+### Suprises and C-style strings
+
+Seemingly "safe" and "common" functions like the `strcpy` function are in fact VERY unsafe. This is because passing in a non null-terminated string into the src ptr will make the implementation endlessly look for a null termination character that makes the program behave badly.
+
+#### Band-aid solution
+
+Make a "safe" `strcpy` which also accepts a limit value; i.e., `strncpy`. Really? We still can't make a `strnlen` right? What would that do? Give up after "n" characters? In fact, this still doesn't help improve the security at all!
+![humorous xkcd panel shows that a user can just pass in a large "n" value and get a raw output that shows other things in the buffer.](image-3.png)
+
+Begs the question, why do we not get guarantees with our C-string API (if you can call it one). Simple, the C-string has no length invariant in it. We can add invariants simply using...
+
+#### OOPS `:O`
+
+We can preserve object invariance, by writing length as a private member of the string that can only be modified by the members of the object. Specifically, encapsulation is what allows this.
+
+There are MANY (read: MANYYYYY) string classes that have been written. For this reason, we abandon the idea to rewrite the string class any better than the current alternatives to `std::string`; we study `std::string` and how it is built.
+
+### Deep dive into the `std::string` class
+
+Fundamentally similar to what `std::vector<>` does. A pointer to manually managed memory which contains the real payload. And a `size` variable to track the real length alongwith a `capacity` variable to track the remaining allocated buffer on the managed memory. More convenient is that the string class itself automaticall manages memory, and owns the buffer.
+
+:::warning
+Counterintuitively, we still store a null-terminating character at exactly `buffer[size]`. This is for the reasons of backwards compatibility. Infact, `string.c_str()` returns a `const char*`.
+
+Also, please don't use `string.data()`, since it returns a simple `char*` allowing the internal pointer to be modified without encapsulation (DANGEROUS).
+:::
+
+#### Suspicious stuff here
+
+Yes, the string class owns the buffer. Allocations on the buffer will be done on the managed memory... usually the heap. What happens if we make these allocations BEFORE `main()`? Worse, what happens if there's a `bad_alloc()` BEFORE `main()`? The example below shows a case where this is indeed possible.
+
+```cpp
+static const std::string s =
+    "String so big that it won't "
+    "fit as a simple list of symbols. "
+    "Proceed with heap alloc :("
+
+void foo(const std::string& arg) {
+    /* blah blah with arg */
+}
+
+int main() {
+    foo(s); // heap alloc seen BEFORE main()
+    // leads to a jmp __abrt() in the asm. BAD
+}
+```
+
+Okay, let's do a band-aid fix. What if, instead of a `static std::string`, we use a `static const char*`? The actual payload "String so big..." will be stored in `.rodata` and the the pointer `s` itself is stored on `.data/.bss`. But there's something even more annoying here.
+
+Any time `arg` receives a `const char*`, it must temporarily materialize it in the body of `foo()` for each call. Every call of `foo()` does an alloc and then a dealloc after arg goes out of scope. This is a serious performance penalty.
+
+#### `std::string_view` solves this!
+
+It is a non-owning pointer to a string. Thus, the following code does not have any heap allocations before main, and calling `foo()` does not temporarily materialize heap-allocated objects every call.
+
+```cpp
+static constinit const std::string_view s =
+    "String so big that it won't "
+    "fit as a simple list of symbols. "
+    "Proceed with heap alloc :("
+
+void foo(const std::string_view arg) {
+    /* blah blah with arg */
+}
+
+int main() {
+    foo(s); // No heap alloc, no performance penalty
+    // The actual owner is the static storage duration
+    // Essentially, .rodata
+}
+```
+
+:::tip
+We throw in a `constinit` qualification to our `static std::string_view`. This guarantees that if the compiler is unable to use compile-time initialization for this, it will throw an error. Essentially, this initialization will be done before any dynamic initialization; and will error out at compile-time if it is not possible to do so.
+:::
+
+### Deep dive into `std::string_view`
+
+It simply contains a pointer to the to the beginning of the view, alongwith a `size` that denotes the size of the view. However, the pointer to the beginning of the view does NOT own the memory being pointed to, and is thus, not responsible for the memory management of the same.
+
+#### Suspicious stuff here (again!)
+
+Unfortunately, the `std::string_view` (and other classes like it) pretends to be a value. It isn't. What happens when the value dangles? Can a value itself be an xvalue? Logically, it shouldn't. Consider this:
+
+```cpp
+std::string_view sv_bad = std::string("Hello World");
+```
+
+`std::string("Hello World!")` is an xvalue since in the very next line, this value reaches the end of its lifetime. But `sv_bad` must bind to it. This breakes value semantics! Many other classes exist with value semantics but _can_ dangle.
+
+:::tip
+A Rule of Thumb for `view`-like types
+
+Use `std::string_view` in the following cases only:
+
+- As a function parameter: `std::string identity(std::string_view sv) { return sv; };`. This is a safe option since the actual owner is outside the scope. The caller guarantees no-dangling.
+- As for-loop initializers: `for (std::string_view e : elems) { /**/ };`. Again, the owner of each e is outside the scope of the for-loop.
+
+
+If you see `std::string_view` anywhere else, beware! Double check the lifetimes.
+:::
+
+### Performance notes
+
+#### CoW
+
+Often, there are copies of the same string in the program, even in the simple case shown below. The same string "Hello\0" is stored in memory twice. Wasting the memory and some performance on extra allocations and deallocations.
+
+```cpp
+std::string s1 = "Hello";
+std::string s2 = s1; // Invokes a copy constructor.
+```
+
+A typical optimization possible here is "CoW" a.k.a. "copy on write". Only increment refcounts on a control block that actually owns the string. When something is edited, the refcount reduces and the actual allocation of a new control block is done. Otherwise, only refcounts are added or subtracted and the string points to the control block.
+
+This doesn't solve everything though. The memory savings come at the cost of an extra pointer indirection. The fewer allocations comes at the cost of thread safety issues and atomic operation requirement on the control block's refcount.
+
+However, there is a reason that CoW strings aren't in the standard anymore: **pointer invalidation**. Very basic operations can invalidate pointers with CoW string!
+
+```cpp
+cow::string s("str");
+const char* p = s.data();
+
+{
+    cow::string s2(s);
+    s[0] = 'S'; // CoW triggered!
+}
+
+// No guarantee that the p is still valid due to
+// reallocation
+// For non-CoW strings, p would have been valid.
+std::cout << *p << '\n';
+```
+
+Editing a single character in a copy of the original string, invalidated the pointer to the original string! This is why the standard in C++11 changed and forbade the `operator[]` from invalidating poiners to the string.
+
+#### SSO
+
+Well, the string block itself has a pointer and two unsigned ints. That consumes around 24 bytes (compiler/hardware dependent behaviour). Why not store really tiny strings (i.e., within 24 bytes) on the stack? This *could* be implemented as a union with size checks ensuring the right dispatch. However, GCC strings (ver >= 5) store the `std::string` as shown below.
+
+![Memory layout of GCC's string for version >= 5](image-4.png)
+
+### A final implementation wrinkle
+
+Since we can store "x bytes" in memory, different strings like UTF-8 and UTF-32 might need repeated implementations. Matter of fact, the 89 public member functions (as mentioned in the video) would have to repeated for each. Enter: generic types!
+
+We will make a `basic_string<CharT>` type that cares only about bytes. And then all other types become conveniences, `using string = basic_string<char>` and `using u16string = basic_string<u16chat_t>` among others.
+
+Moreover, to decouple characted-level semantics (how are characters compared? how does `to_upper()` work?) from the container-level semantics (manage the data pointer, size etc); we pass in another policy class `basic_string<CharT, Traits>`. This can allow us to write custom traits that can, for example, use vectorized instructions for certain traits, or obfuscate credit-card numbers automatically while reading them; etc.
+
+:::caution 
+Allocation of a single character is not a trait of the char itself. It is that of the container since that determines WHERE will the character be allocated.
+:::
+
+Which means that even the allocator must be separated! The final, real class becomes `basic_string<CharT, Traits, Allocator>`. This is super important because often, the default heap-based allocators might not be the best for a given workload; and swapping out a different allocator would be as simple as passing in a different `Allocator` templ arg.
+
+### Homework
+
+#### Write your own CoW-string template class. Measure advantage over `std::string` on some benchmarks
+
+#### Write a template class string_twine for O(logN) concatenation of several `string_view`s
+
+#### Compilers are optimizing `std::string` worse than `std::vector`. Investigate: https://godbolt.org/z/Tfh6zfa6P
+
+### CppCon 2016: Nicholas Ormrod “The strange details of std::string at Facebook"
+
+> [Watch it on YouTube here](https://www.youtube.com/watch?v=kPR8h4-qZdk)
+
+GCC (version < 5) string is actually only a single data pointer... Where are the other details then? BEHIND the actual payload of the string! Moreover, for the empty string, GCC maintains a global variable that is a 25 byte array of zeroes that is the actual empty string.
+
+![gcc old string implementation visualized as a single data pointer pointing to the start of payload AND the end of size/capacity/refcount](image-5.png)
+
+Andrei Alexandrescu suggested the fbstring, which does SSO (with the data/size/capacity) triplet in the stack now. It stores the remaining capacity at the end. The beauty of this design is that when all 23 bytes are occupied, and the 24th byte is the null-terminator. The value of the remaining capacity doubles as the null-termination: 0!!
 
 TBD
