@@ -497,10 +497,14 @@ Which means that even the allocator must be separated! The final, real class bec
 ### Homework
 
 #### Write your own CoW-string template class. Measure advantage over `std::string` on some benchmarks
+TBD
 
 #### Write a template class string_twine for O(logN) concatenation of several `string_view`s
+TBD
 
-#### Compilers are optimizing `std::string` worse than `std::vector`. Investigate: https://godbolt.org/z/Tfh6zfa6P
+#### Compilers are optimizing `std::string` worse than `std::vector`. Investigate [here](https://godbolt.org/z/Tfh6zfa6P)
+
+TBD
 
 ### CppCon 2016: Nicholas Ormrod “The strange details of std::string at Facebook"
 
@@ -512,4 +516,238 @@ GCC (version < 5) string is actually only a single data pointer... Where are the
 
 Andrei Alexandrescu suggested the fbstring, which does SSO (with the data/size/capacity) triplet in the stack now. It stores the remaining capacity at the end. The beauty of this design is that when all 23 bytes are occupied, and the 24th byte is the null-terminator. The value of the remaining capacity doubles as the null-termination: 0!!
 
+I don't even know how to describe the insane jemalloc + kernel + null terminator UB bug. I'll just rewatch the video from that timestamp [here](https://youtu.be/kPR8h4-qZdk?si=K5_Ry-JRWi_lWhXf&t=1260). 
+
+Conclusion? Strings are a lot richer than what we imagine:) . And that the next great string implementation will come with its own trade-offs.
+
+## Lecture 3: Overload sets
+
+:::tip
+The first step is to get the algorithm right. The second step is to figure out which sorts of things (types) it works for:p
+:::
+
+### Illustrative example: Raising a number to a power
+
+We intend to get the algorithm right first (binary exponentiation)
+
+```cpp
+unsigned nth_power(unsigned x, unsigned n) {
+    unsigned acc = 1;
+    if (x < 2 || n == 1) return x;
+    while (n > 0) {
+        if (n & 0x1) {
+            acc = acc * x;
+            n -= 1;
+        }
+
+        x = x * x;
+        n >>= 1;
+    }
+
+    return acc;
+}
+```
+
+#### Naive generalization: templated type of "x"
+
+```cpp
+template <typename T>
+T nth_power(T x, unsigned n) {
+    T acc = 1;
+    if (x < 2 || n == 1) return x;
+    while (n > 0) {
+        if (n & 0x1) {
+            acc = acc * x;
+            n -= 1;
+        }
+
+        x = x * x;
+        n >>= 1;
+    }
+
+    return acc;
+}
+```
+
+While this solutions "feels" like it is more generic than the hardcoded unsigned type. It fails due to two glaring issues. First, is the issue of the `T` which accepts just about any type. However, not all types can support the operations that `nth_power` needs for `T`, like the initial value of `acc` isn't necessarily `1`.
+For example, a `Matrix` class would require `acc` to be an identity matrix instead of a scalar value. Second, the check `x < 2` doesn't logically work for `signed` types either (`-2 ^ 10 != -2`).
+
+#### Improving the naive generalization
+
+To improve this, we assume is that all `T` will have an identity type associated with it (`id<T>`).
+
+```cpp
+template <typename T>
+T nth_power(T x, unsigned n) {
+    T acc = id<T>();
+    if (x == acc || n == 1) return x;
+    
+    /*Same as before*/
+}
+```
+
+This is a really strong assumption though. You can't assume global functions to be required unless they are extremely standard. For example, it is alright to require a `.begin()` since it is very idiomatic in C++. But assuming the existence of such an odd function is not.
+
+Can we solve this by making `id<T>` a part of the type_traits? Well this runs into a similar issue. It is better than having a global requirement and it also decouples the existence of the identity from the type itself and puts it into a `Traits` template parameter. But this isn't how the library solves its problems. Think: Where else do we need an identity type in the standard library, how does it solve the identity issue?
+
+#### Inspired from `std::accumulate`
+
+The standard handles this by passing in the identity value as a function argument to separate these concerns from the type itself.
+
+```cpp
+template <typename T>
+T nth_power(T x, T acc, unsigned n) {
+    while (n > 0) {
+        if (n & 0x1) {
+            acc = acc * x;
+            n -= 1;
+        }
+
+        x = x * x;
+        n >>= 1;
+    }
+
+    return acc;
+}
+```
+
+Also, to improve the quality of usage, we can define full specializations of more commonly used types like `unsigned`:
+
+```cpp
+template <typename T>
+T nth_power(T x, T acc, unsigned n) {
+    /* Same as before */
+}
+
+unsigned nth_power(unsigned x, unsigned n) {
+    if (x < 2u || n == 1u) return x;
+    return nth_power<unsigned>(x, 1u, n);
+}
+```
+
+:::tip
+Notice how the "clean" part of the algorithm gets separated out into a generic function with very little casework. The casework that is type specific, gets handed out to full specializations of wrapper calls.
+
+This is why the building blocks of generic programming are these **overload sets**!
+:::
+
+We notice examples of overload sets being used in the std library all the time. As shown here, the overload sets of the comparison function of `const char*` with `basic_string<...>` avoid an extra copy of the string literal.
+
+![stdlib example of the library using overload sets to save an extra copy for basic_string comparison](image-6.png)
+
+### General principles for the design of overload sets
+
+#### Examples of good design
+
+Different but related types: Ensures consistent behaviour and ensures that the compiler is not creating a temporary `std::string`.
+
+- `void foo(const char* s)`
+- `void foo(std::string s) { Foo(s.c_str()); }`
+
+Different number of parameters
+
+- `auto s1 = twine("Hello", name).str();`
+- `auto s2 = twine("Hello", name, " ", surname).str();`
+
+Optimizations
+
+- `void vector<T>::push_back(const T&)`
+- `void vector<T>::push_back(T&&)`
+
+#### Some rules of thumb
+
+- A person shouldn't need a deep understanding of the C++ overload resolution or of the C++ type system to simply use the function.
+- Noone should be forced to do deep overload resolution in their head.
+- Each overload set should **roughly** do the same thing.
+- Try to encode requirements of the generic function using `requires` constraints.
+- You may create overload sets using `requires` clauses on each type. SFINAE will pick the appropriate overload, and if nothing works, each failing condition will be displayed which is good for diagnostics.
+
+### Fun fact function name mangling
+
+Look at the overloads of `Foo` shown below. They should be mangled to the same name and lead to a redifinition or ambiguity error. Instead, this is perfectly normal and behaves as expected.
+
+```cpp
+template <typename T>
+requires (sizeof(T) > 4)
+void Foo(T x) {}
+
+template <typename T>
+requires (sizeof(T) <= 4)
+void Foo(T x) {}
+```
+ 
+This works because according to the standards two functions with the same name are considered to be equivalent iff:
+
+- They are in the same namespace.
+- Their parameter sets are equivalent.
+- **Their trailing requires clauses are equivalent.**
+
+The compiler treats the requires clause as an integral part of the function interface but NOT as part of the mangled function symbol. This is done by simply checking for viable overloads by the compiler. In this case, the two versions are for mutually exclusive types. Thus, **for a given `T`** only one definition is valid. So even though `nm` should in theory show the same mangled name, the linker doesn't care since for a given type only one type would be valid.
+
+#### Compiler doesn't know that a condition is "more restrictive"
+
+If an overload requires a condition $A$ to be true, while another overload requires a condition $B \sub A$ to be true. The compiler will find both sets to be viable overloads but it won't know that the latter is more restrictive (*it is easy to confuse this with specializations of a template*).
+
+In fact, using concepts is even better here! Complex constraints can be used to check *validity* of an expression as opposed to the boolean evaluated values.
+
+```cpp
+
+template <typename T>
+consteval int somepred() { return 67; }
+
+// simple constraint
+template <typename T>
+requires (somepred<T>() == 42)
+bool foo(T&& lhs, T&& rhs);
+
+// complex constraint
+template <typename T>
+requires requires(T t) { somepred<T>() == 42; }
+bool foo(T&& lhs, T&& rhs);
+```
+
+The first one will evaluate the requires clause at compile time and emit false. The second one however simply checks that the enclosed expression is indeed valid. Since the expression is valid (regardless of its boolean-ness), the clause is satisfied!
+
+:::caution
+I don't think I am clear on the four types of requires clauses and how they differ. Honestly, the syntax is throwing me off a bit so I will return to this later using maybe some other video!
+:::
+
+### concepts
+
+There are 4 types of requires expressions: simple, type, compound and nested. To make these long `requires` clauses more readable and clean, C++20 introduces `concept`. These concepts can be given names, making their intent very clear. It is a compile-time predicate, so it doesn't need to be *called* like a function. The `concept` itself is a value!
+
+:::important 
+Recursive concepts and constraints on concepts by other predicates are not allowed. This is *probably* done to disallow two sources of Turing complete programs (meta programming) by the committee.
+
+We can still put other predicates on a concept using conjuction and mitigate it, but explicit recursion is simply disallowed on concepts.
+:::
+
+Moreover, we can constrain member functions and even constructors inside a class using concepts/requires. Compiler can also partially order concepts to help pick the "most restrictive" viable overload set. How does compiler understand partial specialization? How does it understand that `Ord` is more restrictive than `Ord || Void`.
+
+### Compiler's understanding of `concept`'s constraints
+
+All `concept`s are a series of atomic constraints joined by logical operations (`||`, `&&`; etc.) **with the short-circuiting rules working as usual**. The compiler is able to determine a `subsumes` relation between the constraint sets of two viable overload sets. The set that subsumes all others is automatically the most restrictive viable overload set.
+
+Ideally, we would have preferred to see the subsumes condition to be that: `P subsumes Q <=> (Q => P)`. However, we are not in the real world, and semantic meaning is often going to be too hard for the compiler to determine; leading to false negatives on ill-formed types. In the old RFCs for `concepts` they didn't just account for syntactice, but also semantic requirements using keywords like `axioms`.
+
+### Homework
+
+#### Design a realistic overload set for generic function `nth_power` using constraints. Account for integers, floats and matrices.
+
 TBD
+
+#### Try to figure out what is going wrong [here](godbolt.org/z/Kq1GG7hr)
+
+TBD
+
+![homework problem 3.2](image-7.png)
+
+### Suggested reading
+
+I have noted them down in decreasing order of relevance for myself.
+
+#### Nicolai Josuttis, Back to basics: concepts, Cppcon 2024
+
+#### Andrew Sutton, Concepts in 60, Cppcon 2018
+
+#### Titus Winters, Modern C++ design (2 parts), Cppcon 2018
