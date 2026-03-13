@@ -748,6 +748,150 @@ I have noted them down in decreasing order of relevance for myself.
 
 #### Nicolai Josuttis, Back to basics: concepts, Cppcon 2024
 
+:::caution
+I have described `requires` as an expression and as a clause without giving much thought to it. However, there is a distinction which I was not aware of until I was halfway through the talk:p
+
+```cpp
+
+// Here, the requires expression is "defining" requirements
+template <typename CollT> 
+concept HasPushback = requires (CollT c, CollT::value_type v) {
+    c.push_back(v);
+}
+
+// Here, the requirements clause if defining the actual constraint
+template <typename CollT, typename T>
+requires HasPushback<CollT>
+void add(/**/) {}
+
+// The expression and the clause can also be combined in a single line
+void add(auto& c, const auto& v)
+requires requires { c.push_back(v); }
+{ /**/ }
+```
+
+I have marked the `requires` expression and clause above to distinguish between them.
+:::
+
+
+Shown below, options A and B are both equivalent and result in the same thing. Option B is simply less wordy and more idiomatic C++. Also, when we write `HasPushback T`, notice that `HasPushback` needs 1 template parameter, but here it has none. The compiler simply puts the template argument in front of it in the leftmost position. So `std::is_same_as<int> T` would make the compiler evaluate the syntactic correctness of `std::is_same_as<T, int>`.
+
+```cpp
+template <typename CollT>
+concept HasPushback = requires (CollT c, CollT::value_type v) {
+    c.push_back(v);
+} 
+
+// Option A
+template <typename CollT, typename T>
+requires HasPushback<CollT>
+void add(/**/) {}
+
+// Option B
+template <HasPushback CollT, typename T>
+void add(/**/) {}
+```
+
+Concepts can often emit bad diagnostics. Imagine a spelling error in `concept HasPushback` that looks like:
+
+```cpp
+template <typename CollT>
+concept HasPushback = requires (CollT c, CollT::value_type v) {
+    c.pushback(v); // INCORRECT: push_back is the right spelling
+} 
+```
+
+Now, if there was a less restrictive overload of `add()`, say, with no `requires` clause and a `c.insert(v)` in it; the compiler would complain that `CollT does not have insert()`. This would not lead us to the right source of error. To prevent this, we should put `static_assert`s alongwith the concept. Since the concept is a compile-time predicate, simply adding `static_assert(HasPushback<std::vector<int>>)` would help us locate the error easily.
+
+With the "almost always auto" motto, a lot of the generic function templates can be abbreviated as:
+
+```cpp
+// Option A
+template <typename T1, typename T2>
+void foo(T1 a, const T2 b) {}
+
+// Option B
+void foo(auto a, const auto b) {}
+```
+
+Option B is syntactically equivalent to Option A. However, there is really nice by-product of this design. Since Option B is an abbreviation of Option A, which uses templates; the linker does not need to see an `inline` qualification. We can combine concepts directly with the auto type deduction, by introducing it as a type constraint, shown below (Option B is equivalent to A): 
+
+```cpp
+// Option A
+template <HasPushback T1, typename T2>
+void foo(T1 a, const T2 b) {}
+
+// Option B
+void foo(HasPushback auto a, const auto b) {}
+```
+
+We can also add requires clauses even here, using something like `decltype(a)`. But, the following code does not compile:
+
+```cpp
+void add(auto& c, const auto& v)
+requires HasPushback<decltype(c)>
+{}
+```
+
+This fails because `decltype(c) == std::vector<>&`. While its perfectly legal to call `.push_back()` on a `std::vector<>&`, it is not valid to do `std::vector<>&::value_type`! We can work around this using either `std::decay_t` or `std::remove_cvref_t` on the returned value of `decltype()`. In fact, we can put this into the concept itself:
+
+```cpp
+template <typename CollT>
+concept HasPushback =
+    requires (CollT c, std::remove_cvref_t<CollT>::value_type v) {
+        c.push_back(v);
+    }
+```
+
+:::tip
+Even though we are more used to `std::decay_t` to remove all const/volatile qualifiers; it is now better to use `std::remove_cvref_t` instead, since `std::decay_t` converts arrays to pointers, which might not be the intended effect.
+:::
+
+What about concepts for multiple parameters? Something like `CanPushback<CollT, T>`? That is alright, we can write this as seen before, and it works as a trailing clause of auto-functions too. Both options A and B compile and work well.
+
+```cpp
+template<typename CollT, typename T>
+concept CanPushback =
+    requires(CollT c, T v) {
+        c.push_back(v);
+    }
+
+// Option A
+template<typename CollT, typename T>
+requires CanPushback<CollT, T>
+void add(CollT c, T v) {}
+
+// Option B
+void add(auto c, const auto& v)
+requires CanPushback<decltype(v), decltype(v)>
+```
+
+In general though, it is always better to have coarse-grained concepts. I.e., not making a new concept for each new thing and simply making a general-purpose concept with multiple requirements.
+
+![example of a SequenceCont concept with checks for many, many things within the same concept](image-8.png)
+
+Here, some information on syntax: `{c < c} -> std::convertible_to<bool>` is checking, that the expression `{c < c}` is **valid**, and by putting the expression in curly braces, we turn this simple requirement to a *compound* requirement. The compiler then sees the result of `{c < c}` and passes the type of that result as the **first** template argument of the trailing concept, and then it uses the predicate value of the trailing concept; something like: `std::convertible_to<decltype({c < c}), bool>` (this is only a representative of what compiles by the way).
+
+We could go a step further and force the compiler to check for non-throwing behaviour too. Like so:
+
+```cpp
+template <typename CollT>
+concept HasSwap = 
+    requires (CollT c1, Coll c2) {
+        { c1.swap(c2) } noexcept -> std::same_as<void>;
+    }
+```
+
+This checks:
+
+- `c1.swap(c2)` is well-formed.
+- `c1.swap(c2)` never throws.
+- The return type of `c1.swap(c2)` is `void`.
+
+:::important
+A common gotcha: putting `noexcept` in the requirement **does NOT** make the code `noexcept`, it is only a compile-time predicate.
+:::
+
 #### Andrew Sutton, Concepts in 60, Cppcon 2018
 
 #### Titus Winters, Modern C++ design (2 parts), Cppcon 2018
