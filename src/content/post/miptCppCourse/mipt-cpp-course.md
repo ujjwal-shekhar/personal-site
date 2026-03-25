@@ -2,7 +2,7 @@
 title: "Notes from the Master's Course in C++ (MIPT, 2025-2026)"
 description: "An advanced deep dive into a lot of the C++ internals. I also work out all the assignments here."
 publishDate: "26 Oct 2025"
-updatedDate: "26 Oct 2025"
+updatedDate: "25 March 2026"
 tags: ["c++", "compilers", "lang-features"]
 pinned: true
 ---
@@ -736,9 +736,9 @@ Ideally, we would have preferred to see the subsumes condition to be that: `P su
 
 TBD
 
-#### Try to figure out what is going wrong [here](godbolt.org/z/Kq1GG7hr)
+#### Try to figure out what is going wrong [here](godbolt.org/z/jKq1GG7hr)
 
-TBD
+
 
 ![homework problem 3.2](image-7.png)
 
@@ -814,7 +814,7 @@ void foo(T1 a, const T2 b) {}
 void foo(auto a, const auto b) {}
 ```
 
-Option B is syntactically equivalent to Option A. However, there is really nice by-product of this design. Since Option B is an abbreviation of Option A, which uses templates; the linker does not need to see an `inline` qualification. We can combine concepts directly with the auto type deduction, by introducing it as a type constraint, shown below (Option B is equivalent to A): 
+Option B is syntactically equivalent to Option A. However, there is really nice by-product of this design. Since Option B is an abbreviation of Option A, which uses templates; the linker does not need to see an `inline` qualification. We can combine concepts directly with the auto type deduction, by introducing it as a type constraint, shown below (Option B is equivalent to A):
 
 ```cpp
 // Option A
@@ -895,3 +895,309 @@ A common gotcha: putting `noexcept` in the requirement **does NOT** make the cod
 #### Andrew Sutton, Concepts in 60, Cppcon 2018
 
 #### Titus Winters, Modern C++ design (2 parts), Cppcon 2018
+
+## Lecture 4: Name lookup and overload resolution
+
+As seen in the last lecture, the building blocks for generic programming is an overload set. Clearly, the fact that we overload something; we seek to associate a name with a *semantic meaning*.
+
+```cpp
+auto nth_power(std::integral auto x, unsigned n) -> decltype(x);
+Matrix nth_power(Matrix x, unsigned n);
+```
+
+Above, both overloads of `nth_power` are implemented differently. They operate on different mathematical elements entirely. But, since they are semantically similar; they can logically share the same name. In the language standard, we use language grammar rules to define the formal syntax. **C++ is mostly context-free** becase in most of the grammar rules `A : B`, the expansion will almost always have a single non-terminal on the left-hand side (`A`). Which means, an `if` is always `if` and `for` is always a `for`, since the context in which it is called does not change its behaviour.
+
+Here's the thing though. The C++ compiler does not blindly apply the syntax alone. The example below is syntactically correct since it satisfies the language grammar rules (a parse tree *can* be constructed):
+
+```cpp
+auto *p = new int;
+delete delete delete p;
+```
+
+However, even though it is syntactically correct, **it fails type checking** with an error like `type void argument given to delete, expected pointer`. But type checking is not done by the CFG (context-free grammar). This is just how there can exist grammatically correct sentences that have no proper semantic meaning. But, we do have context-dependent constructs. Take for example the empty square brackets `[]`. The meaning of these brackets changes depending on what comes before or after them. In case of `delete [] ...`, the square brackets are used to signify which `delete` expression is being used. Whereas, in case of lambda expressions, they denote capture lists. Thus, the *parse* works with the *semantic analyzer*.
+
+### Overload resolution rules
+
+![Screenshot of the slide on steps of overload resolution rules](image-9.png)
+
+:::important
+Most of our discussion will be from step 1 to 2. The process of going from all overloaded names to the set of candidate is the most complex and also really important. This is where *name lookup* actually happens.
+:::
+
+#### Overloaded Names -> Candidates
+
+```cpp
+
+void foo(int); // 1
+struct foo{ foo(int); }; // 2
+
+//...
+
+foo(0); // What happens here
+foo{0}; // What about this?
+```
+
+Well, `foo(0)` is obviously a function call! So `foo(0)` goes to option `1`. But, the second option is a compilation error due to ambiguity. Are we dealing with a function or a list initializer? The compiler first tries to treat `foo` as a discarded function pointer, tries to part `foo{` and simply errors out! It never even gets to SFINAE into struct.
+
+![A graph showing the incompatible overloads. For example, namespace and function cannot have the same name. struct and function although can have the same name.](image-10.png)
+
+Above, an edge shows name incompatibility. For example, namespace and function cannot have the same name. struct and function although can have the same name. When the compiler does see overloads. It does quite a few things (non-exhaustive):
+
+#### Is the declaration of the overload already bad?
+
+```cpp
+int b(int);
+const int b(int); // ERROR
+```
+
+Since we can't overload a function based solely on its return type, the compiler errors out here. This is an error because when `b()` is called in the code, the compiler has no way of knowing which overload to call. It can't just see *how* you will look at the return value. However in the next example:
+
+```cpp
+int b(int);
+int b(const int); // OK
+```
+
+Everything works. Infact, the compiler realizes that there are actually no overloads. Since the top-level const qualifier is ignored in the signature, both these functions are exactly the same! The declaration is treated as a redundant one.
+
+:::tip
+Think in terms of the caller when looking at stuff like this. Does the caller *really* care if the function treats the parameter as `const`? Also, remember that we are talking about a top-level `const` here, the function gets its own copy of the passed in parameter. `const` beside a reference/pointer is a low-level `const` since we pass an alias to the original object. The mangled name generated in this case is different.
+:::
+
+Similarly, overloading with noexcept is prohibited too. Overloading static and non-static version within a struct scope is also prohibited. There are other examples too!
+
+#### Scopes change behaviour
+
+Different scopes have different allowances from the compiler (see below).
+
+```cpp
+namespace A {
+    using A::i;
+    using A::i; // OK: double decl
+}
+
+void foo() {
+    using A::i;
+    using A::i; // ERR: double decl
+}
+```
+
+The image below captures the essence of this, while the `namespace` scope allows a lot, the `block` scope on the other hand is very restrictive in its rules. The lookup will behave differently in different scopes due to the restrictions.
+
+![How restrictive is a scope as a hierarchy table](image-11.png)
+
+#### Qualified v/s unqualified name lookup is different
+
+A fun example of this is shown:
+
+```cpp
+namespace B { int x = 0; }
+namespace C { int x = 0; }
+
+namespace A {
+    using namespace B;
+    void f() {
+        using C::x;
+        A::x = 1; // QUALIFIED LOOKUP: sets B::x (which is using B's x)
+        x = 2;    // UNQUALIFIED LOOKUP: sets C::x; (unqualified happens inside out from scope)
+    }
+}
+```
+
+#### Single search (simple  lookup) and base lookup
+
+```cpp
+namespace N { int x = 1; }
+
+int main {
+    int N = 0;
+    N += N::x; // OK!
+}
+```
+
+The compiler is quite smart here. When evaluating the expression `N += N::x` it needs to lookup both the names on either side of `+=`. Now, on the left `N` is anything that can be assigned to (more specifically an object with `operator+=`). It finds the local `N` as a viable candidate. Meanwhile, on the right, the compiler sees `::` and disqualifies non-type names. The compiler will now search for something like a namespace or class. Thus, even though the `int N` is closer in scope, the compiler still discovers the `namespace N` and is able to access the `x` variable there.
+
+Simple lookup (single search) in a scope `S` for a name `N` at a point `P` in the source code finds all declarations of `N` in that scope (it keeps going up the scope too to find others). Meanwhile, in base lookup for a name `N`, a set `S` is constructed with the set of declarations and subobjects. For example:
+
+```cpp
+struct A { int x; };
+struct B { double x; }
+struct D : A {};
+
+struct C : public A, public B { }; // 1
+struct E : public A, public D { }; // 2
+```
+
+Option 1 errors out due to ambiguity. The compiler tries to find the valid declaration of `x` inside the class scope of `C`. It does a base lookup and for every base, it makes a candidate set: `{ A in C, B in C }`. This is called a set of sub-objects. When the time comes to lookup an un-qualified name (`x`), it sees that there are two possible candidates for `x` and declares that the program is ill-formed.
+
+On the other hand, even though for Option 2 we have a defined result for an un-qualified lookup of `A`
+
+:::caution
+I wasn't able to properly understand this part. Will probably go through this a few more times. Consider this specific section and the notion of semantic process incomplete.
+:::
+
+#### ADL
+
+Typical example is too look at the left-shift operator. Something like `std::cout << "Hello\n";` can be deduced as `operator<<(std::cout, "Hello\n");`. However, the operator would have to belong to the `std` namespace: `std::operator<<(...)`. But compiler can't just deduce this from `std::a << b`.
+
+ADL a.k.a. Koenig lookup solves this. The solution goes:
+
+- The compiler first looks for the function in the current and all enclosing namespaces.
+- Failing which, it then looks up the function in the namespaces of the arguments.
+
+```cpp
+namespace N { struct A; int f(A*); }
+int g(N::A* a) { int i = f(a); return i; }
+```
+
+Here, inside `g(...)`, The compiler first sees in the current scope if there is a function `f(...)` using simple unqualified lookup. That fails (because there isn't one here). Next, the compiler looks at each argument and their associated namespace, and then searches for a definition of `f(...)` in `N`.
+
+```cpp
+typedef int f; // DISABLES ADL!!
+namespace N { struct A; int f(A*); }
+int g(N::A* a) { int i = f(a); return i; }
+```
+
+In this case, the compiler indeed finds a definition of `int f` in the current namespace due to an unqualified lookup. This completely stops the compiler from trying ADL and ever finding `N::f()`. The compiler translates the line to a function-style typecast `int i = int(a);`. Of course, if the `struct A` cannot be type-casted to an `int`, this fails.
+
+:::caution
+Be careful though, there is no SFINAE to save us here. It's not like if the unqualified lookup provided candidate is found to be incompatible, the compiler will try ADL. It will not, and it will fail! 
+:::
+
+Even funnier is the next example. **It does not work!**. It fails with really bad error messages too. Think about it in terms of what the parser would see when it sees the following tokens: `f`, `<`, `int`, `>`?
+
+```cpp
+namespace N {
+    struct A;
+    template <typename T> int f(A*);
+}
+int g(N::A* a) { int i = f<int>(a); return i; }
+```
+
+Yes, the compiler indeed thinks that this is an `operator<` after parsing until `f<`. The compiler has absolutely no way of knowing that `f` is supposed to treated as a template type! Simply adding any templated definition for `f` (regardless of the actual function signature), makes this work normally. So something like this works:
+
+
+```cpp
+namespace N {
+    struct A;
+    template <typename T> int f(A*);
+}
+template <typename T> void f(void);
+
+// Works now
+int g(N::A* a) { int i = f<int>(a); return i; }
+```
+
+The next example will make the case of unqualified lookup a little clearer.
+
+```cpp
+
+namespace A {
+    struct std {
+        struct Cout {};
+        static Cout cout;
+    };
+
+    void operator<< (std::Cout, const char*) {
+        ::std::cout << "World\n";
+    }
+}
+
+int main() {
+    using A::std;
+
+    ::std::cout << "Hello"; // Prints "Hello"!!
+    std::cout << "Hello"; // Prints "World\n"!!
+}
+```
+
+`using A::std` binds the default "unqualified" `std` lookup to `A::std`. This is perfectly valid syntax. The only way to actually use the standard `cout` is to fully qualify it by writing `::std` which finds the right namespace (instead of the struct).
+
+:::tip
+Lesson learnt: If you wish to ABSOLUTELY clear on what you are using, please fully qualify your names!
+:::
+
+#### ADL and hidden friend
+
+A very powerful feature is that if a member function is declared inside a class, *it can only be found via ADL*.
+
+```cpp
+struct X {
+    friend bool operator== (X lhs, X rhs) {
+        return lhs.data == rhs.data;
+    }
+};
+
+struct Y {
+    auto operator X() const { return X{} };
+};
+
+X a, b; Y c, d;
+(a == b); // OK
+(c == d); // FAILS
+```
+
+Imagine if such a facility didn't exist. `(c == d)` would have compiled only because it can get typecasted to `X`. In the `(a == b)` line, the compiler looks at it as `operator==(a, b)`. Then, since there is no `operator==()` in the current scope. So, the compiler does an ADL and is able to find `X::operator==()` instead as a hidden friend.
+
+### Selecting candidates
+
+We must note that although template instantiation usually happens AFTER the entire process of overload resolution. Sometimes, the compiler will do template instantatiation to select the candidates. Like, for a function `bar` that may have some templated version, it might instantiate the template to see if it is a viable candidate.
+
+### Check viability of candidates
+
+An example of viability is to check for number of paramters for a function overload. For a function call with `m` parameters, an overload is selected if it has *exactly* `m` parameters. An overload with less than `m` parameter is not selected unless it has an ellipsis in the arg list.
+
+```cpp
+foo(int); // Not viable
+foo(int, ...); // viable
+foo(int, float, int = 0); // viable
+foo(int, float, int); // not viable
+
+int main() {
+    foo(1, 2);
+}
+```
+
+### Selecting the best candidate
+
+The compiler buids a chain of conversions. The priority is given (in the decreasing order) rougly as:
+
+- Standard conversions
+- User-defined conversions (like a constructor or conversion operator)
+- Ellipsis (...)
+
+![A list of standard conversions and their rank/priority is shown](image-12.png)
+
+When there are two valid chains of conversion, intuitively the shorter chain wins. For example:
+
+```cpp
+struct A {
+    operator int();    // 1
+    operator float();  // 2
+}
+
+int x = A{}; // CALLs 1
+```
+
+One chain of conversion for `int x = A{}` would have been to do `A::operator float()` (user-defined constructor) to `Float-to-int conversion` (standard conversion). The other chain of conversion is to do `A::operator int()` instead. The latter is preferred since it is a shorter chain. This is so interesting, because somehow the compiler *is* using information from the left hand side of the expression.
+
+In the ICS (implicit conversion sequence), there cannot be more than one user-defined conversions according to the standard. Lets see an example:
+
+```cpp
+
+struct S {
+    S(long) {}
+    S(T) {}
+};
+
+struct T {
+    T(int) {}
+}
+
+void f(S) {}
+int x = 42;
+foo(x);
+```
+
+Here, there are two ICS's. One is from an `int` to a `long` (standard conv). Then, from a `long` to an `S` (user-defined constructor). The other one is from an `int` to `T` (user-defined constructor). Then, from `T` to `S` (user-defined constructor again). `T` loses to `long`, and the first chain is selected.
+
+Finally, **if there is no candidate, or two equally good ones; the code is ill-formed**.
