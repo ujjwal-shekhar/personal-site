@@ -1200,4 +1200,645 @@ foo(x);
 
 Here, there are two ICS's. One is from an `int` to a `long` (standard conv). Then, from a `long` to an `S` (user-defined constructor). The other one is from an `int` to `T` (user-defined constructor). Then, from `T` to `S` (user-defined constructor again). `T` loses to `long`, and the first chain is selected.
 
-Finally, **if there is no candidate, or two equally good ones; the code is ill-formed**.
+Finally, **if there is no candidate, or two equally good ones; the code is ill-formed**. The semantic process so far (in order) are:
+
+- Alias substitution
+- Name lookup
+- Over resolution
+
+The processes together form **Name resolution**. This is followed by template instantiation, type deduction etc.
+
+:::important
+Type deduction and template instantation can trigger new name resolution down the line. An example of this:
+
+```cpp
+template <typename T>
+T min(T x, T y) {
+    return x < y ? x : y;
+}
+
+template <typename T>
+T min(T x, T y, T z) {
+    auto t = min(x, y);
+    return min(t, z);
+}
+```
+
+Here, `min(1, 2, 3)` does name resolution to find that there is only one viable candidate (by number of parameters `T min(T, T, T)`). Then, template instantiation triggers and the first line in the function's code block is `auto t = min(x, y)`. This again triggers name resolution to find the only viable candidate (again, by number of parameters `T min(T, T)`).
+:::
+
+### Homework
+
+#### (1) Characterize the following on the basis of C++23
+
+```cpp
+template <class T1, class T2>
+struct Pair {
+    template <class U1 = T1, class U2 = T2>
+    Pair(U1&&, U2&&) {}
+}
+
+struct S { S() = default; };
+struct E { explicit E() = default; };
+
+int f(Pair<E, E>) { return 1; }
+int f(Pair<S, S>) { return 2; }
+
+assert(f{{}, {}} == 2); // ok or no?
+```
+
+My approach: So, `f{{}, {}}` is instantiating a pair of something. Now, if `f{{}, {}}` tries to use the first overload, then a `Pair<E, E>` would be needed. Which implies that an empty initializer list would be used. Since `E`'s default constructor is marked `explicit`, it doesn't allow implicit conversions to `E`. OTOH, if the second overload were to be used, there would be an implicit conversion of `S` using the default `S` constructor. `{} -> S`: causing the second overload to be used as a viable candidate.
+
+I feel like the `assert` should evaluate to `true` and pass. But I feel like something might go wrong with the compiler during the evaluation of the first overload itself. Will verify this!
+
+#### (2) Characterize the following on the basis of C++23
+
+```cpp
+struct Foo {};
+struct Bar : Foo {};
+struct Baz : Foo {};
+
+struct X {
+    operator Bar() {
+        std::cout << "Bar\n";
+        return Bar{};
+    }
+
+    operator Baz() const {
+        std::cout << "Baz\n";
+        return Baz{};
+    }
+}
+
+void foo(const Foo& f) {}
+
+int main() { foo(X{}); } // Bar or Baz?
+```
+
+My approach: I notice that the only thing that is different in the two ICS's is that `X -> Baz()` is const protected. Well both ICS's look like `X -> Bar/Baz` (user defined conversion). And then `Bar/Baz -> Foo` which is a conversion constructor. I am worried that the constness of `operator Baz()` wouldn't make it a better candidate. The answer is either `Baz` or the program is ill-formed due to two equally valid overload candidates
+
+### Extra Reading
+
+#### Mateusz Pusz, Back to basics, name lookup and overload resolution CppCon 2022
+
+TBD
+
+## Lecture 5: Type deduction
+
+:::important
+Apparently, in C++ type deduction is too limited. We will start with seeing a different language where the compiler seems to be reading our mind even! In the lecture a Haskell code example of a `map` function is discussed. I won't show it here, but if such powerful type inference were to exist in C++ we would see something like:
+
+```cpp
+auto map(auto f, auto ls) {
+    if (ls.empty()) return ls;
+    auto x = head(ls); auto xs = tail(ls);
+    return list{f(x), map(f, xs)};
+}
+
+// would get type inferred to something like:
+// OBVIOUSLY, THIS DOESN'T HAPPEN
+template<typename T, typename U, Callable F>
+requires requires (F f, T t) { f(t) -> std::convertible_to<U>; }
+list<U> map(F f, list<T> ls);
+```
+
+:::
+
+Why can't C++ do any of this? Unfortunately, Hindley-Milner style type inferences need a **principal type** to begin with; i.e., a type that can describe all possible type inferences. But overload sets in C++ we can't use it. This is why Haskell or OCaml do not have functional overloading. Instead those languages do pattern matching. It *looks* like overloading but assumes the existence of a principle type.
+
+:::tip
+TL;DR: A langugage can either have HM-style inference or a powerful overloading mechanism.
+:::
+
+### One step deduction
+
+Generally functions in C++ do a one step type deduction. In `std::integral auto a = 5;`, the type is immediately deduced to an `int`. There is no "system of equations" to solve here! Because there is no principal type either! Let's see where this could cause problems for us:
+
+```cpp
+template<typename T>
+T max(T x, T y) { /**/ }
+
+max(1, 2); // succeeds
+max(1, 1.0); // fails!
+max<double>(1, 1.0) // succeeds!
+```
+
+Even though logically, `double` could have been deduced for `max(1, 1.0)` as *the most general type* that satisfies both, one might argue that casting both to an `int` might have also worked. C++ doesn't have a way to do this, it is built on the philosophy of concretization of types. In the third case we manually found a way to do this by instructing the compiler to use standard conversions to a `double` type. Now, the type is concrete enough for conversions to take over and type deduction doesn't have any issues since we manually give it a specification.
+
+### Default arguments
+
+:::tip 
+Default function arguments are completely ignored during type deduction!
+:::
+
+```cpp
+template<typename T=double>
+double foo(T x = 1.5);
+
+auto v0 = foo(2.0);
+auto v1 = foo(1);
+auto v2 = foo(); // this would break if no default value of x = 1.5
+```
+
+In the above, the compiler would lose any way to deduce that x is a `double`. Say that the default templ arg was missing, there would be no way for the compiler to see the default function argument during type deduction and deduce `T` from `1.5`. OTOH, if the default function argument was missing, then `foo()` would not match any overloads due to an improper number of arguments.
+
+### Type decays during deduction
+
+:::important
+During deduction, references and top-level cv qualifiers are stripped away. This helps avoid generating functionally identical specializations.
+:::
+
+```cpp
+const int &a = 1;
+int b = 2;
+const int c = 1;
+int &d = 4;
+
+auto x = max(a, b); // deduces to int
+auto y = max(c, d); // deduces to int
+
+std::integral auto z = a; // also deduced to int
+std::integral auto w = a; // also deduced to int
+```
+
+### Deduction of elaborated types
+
+:::important
+cv-qualifiers are preserved when the templated type is elaborated. This is because with elaborated types, the compiler does pattern matching with the position of `&`.
+:::
+
+```cpp
+template<typename T>
+void foo(T& x);
+
+const int &a = 1;
+foo(a) // T is elaborated because T&
+// therefore T-> const int
+// making it -> void foo<const int>(const int&)
+```
+
+Same goes for the `auto` type deduction when `auto` is elaborated.
+
+```cpp
+const int x = 1
+auto& z = x; // -> const int& z = x;
+```
+
+### Type deduction of recursion
+
+```cpp
+// COMPILES
+auto sum(int i) {
+    if (i == 1) {
+        return 1;
+    } else {
+        return sum(i - 1) + 1;
+    }
+
+// DOES NOT COMPILE
+auto sum(int i) {
+    if (i != 1) {
+        return sum(i - 1) + 1;
+    } else {
+        return 1;
+    }
+}
+```
+
+In the above example, there is something really interesting going on, the second version with the recursive call appearing first does not compile! The compiler complains about `the use of auto sum(int) before deduction of auto`.
+
+Upon inspecting the standard, a really odd formulation appears. **One of the 3 occurences of the phrase "has been seen"** appears here (first point in the screenshot attached). ![Slide with 3 cases of "has been seen" across the standard](image-13.png)
+
+:::tip
+Most likely, the phrase "has been seen" implies that the top to bottom, left to right parsing of "having seen" something.
+:::
+
+### Oddities of the initializer_list
+
+```cpp
+auto x1 = {1, 2};   // initializer_list
+auto x2 = {1, 2.0}; // Compile error
+auto x3{1, 2};      // Compiler error 
+auto x4 = {4};      // initializer_list
+auto x5{4};         // int !!!!
+```
+
+As long as the compiler can deduce the types of the list being assigned, it will be taken as a `std::initializer_list<type>`. However, when brace-initialization is being done, **only a single entity** being present inside the list will be allowed.
+
+:::warning
+The below code would give `int` after C++17, and a `std::initializer_list` before it!
+
+```cpp
+auto x5{4};
+```
+
+:::
+
+### What about rvalue references in template/auto type deduction
+
+The same underlying machinery controls the type deductions used int `auto&&` and `template<typename T> T&&`.
+
+```cpp
+auto&& x = y;
+
+// vs
+
+template<typename T>
+void foo(T&& x);
+```
+
+#### Aside: glvalue, prvalue, xvalue, lvalue, rvalue...
+
+An **expression** is a sequence of operators and operands that specifies a computation. All the following lines are expressions:
+
+```cpp
+int a = 5;
+int b;
+5;
+float ff;
+
+// On the right, even though `a` is a glvalue
+// the entire expression `a + 2` is a prvalue!
+int x = a + 2;
+```
+
+![Pictorial representation of the hierarchy of value expression types](image-14.png)
+
+The most important ones are:
+
+- `glvalue`: An expression that identifies an expiring but a **persistent** object. It is more about identity "what is it?"
+- `prevalue`: An expression that is the recipe for creating objects. It is more about "what is the value?"
+
+The above pictorial representation is usually mapped using the "Identity-Movability" metrics. ("I" mean identifiable, and "M" means movable).
+
+- glvalue: Identifiable
+- rvalue:  Movable
+- lvalue:  Identifiable + NOT movable
+- xvalue:  Identifiable + movable
+- prvalue: NOT Identifiable + movable
+
+Now, the whole point of having rvalues is to enable functional overloading with optimizations for values that are movable.
+
+```cpp
+
+int foo(int &p) { return 1; }
+int foo(int &&p) { return 2; }
+int foo(const int &p) { return 3; }
+int foo(const int &&p) { return 4; }
+
+int x = 1;
+const int y = 2;
+
+foo(x); // 1
+foo(1); // 2
+foo(y); // 3
+foo(std::move(y)) // 4!!!
+```
+
+Note that for `foo(1)`, the overload picked was the modifiable rvalue reference. Again, this is because the whole point of rvalues is to be able to steal from them. A classic usecase is in move constructors of classes that can potentially save extra copies and/or allocations.
+
+### Reference collapsing
+
+In the example below, one would assume that `auto &&c` becomes an rvalue reference to a reference (`y`). This would make no sense, to tackle this, in C++ we have reference collapsing which only lets `auto&&` deduce to an rvalue reference if it refers to an rvalue reference itself.
+
+```cpp
+int x; int &y = x;
+
+auto&& a = std::move(y); // int &&
+auto&& b = y             // int &
+```
+
+### Universal/forwarding references
+
+Thus, `auto &&` is an lvalue or an rvalue depending on the context. In fact, "universal" or "forwarding" references use the same thing:
+
+```cpp
+auto &&y = x; // x is some& -> y is some&
+template <typename T>
+void foo(T&& t);
+//...
+foo(x); // T is deduced similar to auto&&, depending on x
+```
+
+:::warning
+Adding a const qualifier to `&&` would remove reference collapsing. Thus, neither of the two examples below are universal/forwarding refereneces. They refuse to bind to lvalues, and thus stop being *universal*.
+
+```cpp
+const auto&& x = y; // no collapsing here
+
+template <typename T>
+void buz(const T&& param); // same, no collapsing due to `const`
+```
+
+:::
+
+More importantly, we need a deduction context for the reference to be a universal reference. Imagine a member function of a struct:
+
+```cpp
+template <typename T>
+struct Buffer {
+    Buffer(T&&) {
+        // T&& IS a universal ref
+        /* In the move constructor, we are in a */
+        /* deduction context, T is yet to be determined! */
+    }
+
+    void member_func(T&&) {
+        // T&& is NOT a universal ref
+        /* Here, no deduction is needed, T is known already */
+        /* T is simply substituted in this case, without deduction */
+    }
+
+    template <typename U>
+    void another_member(U&&) {
+        // T&& is NOT a universal ref
+        // U&& IS a universal ref!!
+        /* Here, every call of this function would */
+        /* require a deduction! Thus, U&& is a universal ref */
+    }
+}
+```
+
+### Main "hacks" in type deduction
+
+```cpp
+
+template <typename T>
+int foo(T&& x);
+
+int x; int &y = x;
+
+// For a non-prvalue, the type T
+// itself got deduced to a ref
+// the function param by ref collapsing
+// becomes ref
+foo(x); // foo<int&>(int&)
+foo(y); // foo<int&>(int&)
+
+// for a prvalue though, T got deduced
+// to a value type, and the function param
+// by ref collapsing becomes refref
+foo(5); // foo<int>(int&&)
+```
+
+### decltype, why?
+
+`auto` tends to strip types and qualifiers. What if I would like to declare a new variable with the EXACT same type as another? Literally using the "declaration type" of another variable?
+
+```cpp
+
+const int x = 5;
+
+auto &y = x;  // deduces int
+auto &&z = x; // deduces const int&
+decltype(x) t = 6; // deduces type of t as `const int`
+
+// Only the last version is precisely `const int`
+```
+
+There is a problem. What happens when there is one layer of indirection to the underlying of the decltype?
+
+```cpp
+struct Point { int x, y; };
+
+Point temp = { 1, 2 };
+const Point& p = temp;
+
+decltype(p.x) a; // `int a` or `const int& a`??
+```
+
+:::important
+`decltype(p.x)` deduces to `int`. It cares only about the name and exact type, you may even read it as `decltype(name)`.
+`decltype((p.x))` deduces to `const int&`. It respects value categories, you may read it as `decltype((expr))`.
+:::
+
+More formally, the rules are:
+
+- Rule 1: If the argument passed to `decltype` is a plain name then it gives the simple declared type of the name. `decltype(x) -> int`
+- Rule 2: Otherwise:
+
+  - lvalue expr gives `T&`. `decltype((x)) -> int&`
+  - rvalue expr gives `T&&`. `decltype(std::move(x)) -> int&&`
+  - prvalue expr gives `T`. `decltype(x + 0) -> int`
+
+Realize that the only situation where double parenthesis are needed is when we wish to treat a name (formally, an `id-expr`) as an expression. `decltype(std::move(x))` for example didn't need double parenthesis, since the parameter was a call expression and thus evaluated Rule 2.
+
+### declval, why?
+
+In the following case, we need the `decltype` of the member function `foo()`. But unfortunately, the default constructor is deleted, so it can't be instantiated. Since `decltype` needs a valid expression to work with, even if we only need the "type", the lack of a default constructor (for example), could make a value type inconsistent.
+
+```cpp
+template <typename T>
+struct Wrapper {
+    // ERROR if T doesnt have default ctor
+    using ReturnType = decltype(T().foo());
+
+    // OK! Makes the compiler "pretend" that
+    // there is an instance of T there 
+    using ReturnType = decltype(std::declval<T>().foo()); 
+};
+```
+
+It is implemented as a declared but unimplemented type. Basically:
+
+```cpp
+template <typename T>
+typename std::add_rvalue_reference_t<T> declval() noexcept;
+```
+
+Now, due to ref collapsing it evaluates to either an rvalue or lvalue reference. And so, we can even use it for abstract classes. Since a reference is all that is returned, the compiler doesn't care about if the object can "actually" exist.
+
+:::important
+Notice that `declval<>()` is an unimplemented declaration! So, we must use it non-evaluated contexts like inside of `decltype` or `sizeof`. It is literally a compile-time xvalue! Its lifetime will expire during compile-time.
+:::
+
+### Finally... decltype(auto), WHY?
+
+Combines the type deduction from both mechanisms. The idea is to deduce the type of the lhs using the type from the rhs. Like before, the rhs being an `id-expr` vs `expr` will alter this.
+
+```cpp
+double x = 1.0;
+decltype(auto) t = x;   // double t;
+decltype(auto) t = (x); // double& t;
+```
+
+### A case for condition std::move
+
+Say, we need a fully transparent wrapper. It takes a function, its argument (assuming single arg only for now). And calls the function on its args. Simple?
+
+```cpp
+template <typename Fun, typename Arg>
+decltype(auto) caller(Fun fun, Arg arg) {
+    return fun(arg);
+}
+
+// BUT...
+struct Buffer;
+
+Buffer b;
+caller(something, b); // Extra copy of b created!
+```
+
+While it is correct, and a good usecase of `decltype(auto)` to retain the exact return type of `fun()`. BUT, we see that the argument makes a copy. How about we make it use `Arg& arg` instead? That fails because rvalues cant bind to non-const lvales, so `caller(something, something(b))` would not compiler. Fine, lets make two overloads based on the const-ness of the argument.
+
+```cpp
+template <typename Fun, typename Arg>
+decltype(auto) caller(Fun fun, Arg& arg) {
+    return fun(arg);
+}
+template <typename Fun, typename Arg>
+decltype(auto) caller(Fun fun, const Arg& arg) {
+    return fun(arg);
+}
+```
+
+Cool, what would happen, for 2 arguments now? 4 overloads! What about an arbitrary $N$ arguments? $2^N$ overloads!! This is bad, but it's alright. We can use our recently learned *universal references* right?
+
+```cpp
+template <typename Fun, typename Arg>
+decltype(auto) caller(Fun fun, Arg&& arg) {
+    return fun(arg);
+}
+
+struct Buffer;
+
+Buffer b;
+caller(something, b); // (1) works!
+caller(something, something(b)); // (2) works!
+```
+
+Both options work, but alas there is one last bit of problem here. Case (2) is still making an extra copy. While in case (2) the object passed is indeed a prvalue, in the body of the caller, `arg` is a named variable. Due to this is satisfies "Identifiability" and cannot be treated like an rvalue and is just used as a simple value again. Yet again, there is a copy in case (2).
+
+:::tip
+If you give an rvalue, a name **the compiler is forced to treat it as an lvalue**. Imagine the following case:
+
+```cpp
+void process(std::string&& arg) {
+    some_function(arg); // imagine this used arg as rvalue
+    std::cout << arg << "\n"; // this would CRASH!
+}
+```
+
+To prevent situations like the one above, the compiler needs to treat the *named* rvalue as an lvalue until we explicitly call something like `std::move(arg)` and unconditionally convert it to an rvalue and cease its lifetime.
+:::
+
+Only if we could have a way to *conditionally* typecast the arg to an rvalue if it was indeed an rvalue. And C++ can do it:
+
+```cpp
+template <typename Fun, typename Arg>
+decltype(auto) caller(Fun fun, Arg&& arg) {
+    return fun(std::forward<Arg>(arg));
+}
+```
+
+It **perfectly forwards** the argument. If `Arg` was an rvalue, then it changes to `std::move(arg)`, else if the `Arg` was an lvalue, then it would do nothing.
+
+:::tip
+If you ever find yourself returning an rvalue from a function. STOP! Think. The only three cases where you really need to be returning an rvalue (specifically, an xvalue) are:
+
+- `std::move`
+- `std::declval`
+- `std::forward`
+
+If you are returning `&&`, you are either doing something wrong, or need to reimplement one of the above three functions during an interview!
+:::
+
+### Class Template Arg Deduction (CTAD)
+
+Since C++17 we can use class constructor's type deduction, to deduce the type of the class! An example of what this accomplishes:
+
+```cpp
+template <typename T>
+struct container {
+    container(T t);
+};
+
+// Before C++17
+auto c = container<int>(5);
+
+// After C++17
+auto c = container(5); // -> auto deduce container<int>(5);
+```
+
+The above works because the class constructor already takes a `T` template param. Sometimes though the case is too complicated for the compiler to automatically deduce the type. For example:
+
+```cpp
+template <typename T>
+struct container {
+    template <class Iter>
+    container(Iter begin, Iter end);
+    //...
+};
+
+
+// The compiler cant find T after deducing Iter
+vector<double> temp;
+auto v = container(temp.begin(), temp.end()) // FAILS
+// It deduces the iterator, and while yes,
+// the iterator::value_type is double. The compiler
+// needs info to do: `T = iterator::value_type`
+```
+
+In these cases, the user can tell the compiler what to do. We know that `Iter::value_type` is the correct value of `T`, as long as `Iter` is successfully deduced. A *deduction guide* is written:
+
+
+```cpp
+template <typename T>
+struct container {
+    template <class Iter>
+    container(Iter begin, Iter end);
+    //...
+};
+
+template<class Iter> container(Iter b, Iter e) ->
+    container<typename std::iterator_traits<Iter>::value_type>;
+
+// Read it like this:
+// If you see a constructor of this style (lhs of ->)
+// Please deduce the class template of container, like this (rhs of ->)
+
+vector<double> temp;
+auto v = container(temp.begin(), temp.end()) // OK! container<double>
+```
+
+:::caution
+I haven't made notes on some of the type deduction hiccups that are in the video. Like more elaborate deductions of `template <typename T> foo(T (*p) (T));` etc. Also, on how a type deduction context CANNOT trigger another type deduction context inside itself.
+:::
+
+### Partial ordering of function overloads
+
+The most specialized function is the one that is chosen. In the two examples below:
+
+```cpp
+template <typename T> int foo(T x);   // 1
+template <typename T> int foo(T* x);  // 2
+
+int **x = 0;
+// &x is an int***
+foo(&x); // Which one to use?
+```
+
+The first one would deduce `T=int***`, and the second would deduce it as `T=int**`. To be fair, both options are viable. The compiler needs a way to break ties here. To do this, two artifical types are created. One goes to the first candidate specialization and then compiler checks if the type deduced here can also be deduced in the second candidate. It does the same the other way vice-versa. It becomes clear that `T*` is "more specialized" as all types that can satisfy `T*` can definitely satisfy `T`.
+
+### Homework
+
+#### Implement Hindley-Milner in C++
+
+:::caution
+I will need some time refresh my Racket basics from 2 years ago, but this is a really interesting assignment problem that I would like to do!
+:::
+
+![Image of the slide with HW5.1](image-15.png)
+
+### Suggested reading
+
+#### Andreas Fertig - Cppcon 2022: Back to Basics of Move Semantics
+
+TBD
+
+#### Nicolai Josuttis - Cppcon 2017: The nightmare of move semantics for trivial classes
+
+TBD
+
+## Lecture 6: Template Specialization
+
