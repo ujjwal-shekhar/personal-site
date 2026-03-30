@@ -2,7 +2,7 @@
 title: "Notes from the Master's Course in C++ (MIPT, 2025-2026)"
 description: "An advanced deep dive into a lot of the C++ internals. I also work out all the assignments here."
 publishDate: "26 Oct 2025"
-updatedDate: "25 March 2026"
+updatedDate: "29 March 2026"
 tags: ["c++", "compilers", "lang-features"]
 pinned: true
 ---
@@ -1841,4 +1841,432 @@ TBD
 TBD
 
 ## Lecture 6: Template Specialization
+
+Instantiation is the process of creating an instance of a specialization. For example in the code below, the `min<int>` instance is created on demand (lazily).
+
+```cpp
+template <typename T>
+T min(T x, T y) {
+    return x < y ? x : y;
+}
+
+auto x = min(1, 4); // instantiates min<int> specialization
+// which leads to the generation of template<> int min(int, int)
+```
+
+Now, if the compiler sees another instance of say, `min(3, 4)` in the same translation unit, it won't instantiate a second time. Thus, only the first demand of that specialization is done.
+
+However, if the compiler sees another demand for `min<int>` in a different translation unit, it instantiates the same specialization again. This can be problematic for very heavy functions and lead to an increase in the object file size. Instantiation can be explicitly requested AND explicity suppressed:
+
+```cpp
+// Promises the compiler that the linker will
+// eventually find this specialization, don't
+// generate it in this TU again
+extern template<> int max(int, int);
+
+// Demands the specialization upfront
+template<> int max(int, int);
+```
+
+The design pattern often seen here is that extern declarations of the template will be done in one source file and included in every TU that needs it. Also note that a specialization should "come after" the primary type. More specifically, when an explicit specialization is defined, the primary type should already by reachable.
+
+### Instantiation Rules
+
+- An explicit instantiation may appear only once in the program.
+- An explicit specialization may appear only once in the program.
+- An explicit instantiation comes after an explicit specialization.
+
+A violation of these rules results in an IFNDR, so something like this:
+
+```cpp
+// Primary type came first
+template <typename T> T foo(T) {};
+
+// Explicit specialization comes next
+// Used when the generic compiler generated
+// spec is not what you want for `int`
+template <> int foo(int) {};
+
+// Now we can do an explicit instantiation.
+// It comes AFTER the specialization, so it
+// will use the special ver.
+template int foo<int>(int);
+
+// Had the 3rd line come before 2, compiler
+// would have implicity instantiated a specialization
+// using the primary type. Then, the explicit
+// specialization would cause an IFNDR error.
+```
+
+:::caution
+This gets tricky when combining `extern` (blocking implicit instantation). The following code should simply work. It should have "blocked" implicit instantiation, and not caused a problem for the next line having an explicit specialization.
+
+```cpp
+extern template int foo<int>(int);
+template<> int foo(int) {};
+```
+
+`extern`ing a specialization does not prohibit it, it simply promises that it would exist before. Which means that in the next line, we reach an explicit specialization after "promising" an implicit specialization already. This violates the rules because if we have already generated an implicit instantiation, an explicit specialization cannot come after!
+
+Swapping the two lines, of course works.
+:::
+
+What about deletion of explicit specializtion? What would happen if we first generate a specialization and then `delete` it?
+
+```cpp
+// primary type
+template <typename T> void foo(T*);
+
+// delete specializations
+template <> void foo<int>(int*) = delete;
+template <> void foo<void>(void*) = delete;
+
+// foo() works for all pointers EXCEPT void* and int*.
+```
+
+#### Non-type parameters
+
+Non-type parameters can be structural types, which are:
+
+- scalar types (except floating point).
+- lvalue references.
+- struct with all structural type fields and bases that are non-mutable and public.
+
+Basically, everything should be known at compile-time. Examples shown below:
+
+```cpp
+struct Pair { int x, y; };
+template <int N, int *pN, int& rN, Pair p> void foo();
+
+template<typename T, int N> int foo(T(&arr)[N]);
+template<> int foo<int, 3> foo(int(&arr)[3]);
+```
+
+#### Template template parameters
+
+```cpp
+template<template<typename> Cont, typename Elt>
+void print_size(const Const<Elt> &c);
+```
+
+### Specialization and type deduction interaction
+
+```cpp
+template <typename T> void foo(T);  // 1
+template <typename T> void foo(T*); // 2
+template <> void foo(int*);         // 3
+
+int x;
+foo(&x); // ?
+```
+
+Above we have three options for the type deduction of `foo(&x)`. Now, one important thing to note here is that **specializations do not participate in overload resolution**. Obviously, the primary template that wins is `(2)`. But which template does `(3)` specialize then?
+
+The answer is interesting. To ask "which template does `(3)` specialize" is not needed. Anyways, we only care about the primary template that survives overload resolution. Then, whichever primary template remains, the specialization then latches onto that! So `foo(&x)` obviously uses `(3)`. But here, `(3)` ends up being a specialization of `(2)`.
+
+:::important
+To understand the above logic in more detail, we look at the *Dimov-Abrams counterexample*:
+
+```cpp
+template <typename T> void foo(T);  // 1
+template <> void foo(int*);         // 2
+template <typename T> void foo(T*); // 3
+
+int x;
+foo(&x); // ?
+```
+
+Here, `foo(&x)` chooses **`(3)`**! That is because, when `(2)` is seen by the compiler, overload resolution only finds `(1)`, which wins. Then, `(3)` is latched as a template specialization of `(1)` instead. Later, when `foo(&x)` demands an overload, the compiler again does an overload resolution. During this overload resolution, `(3)` wins against `(1)`. But, since it has no further template specializations, it does not go to `(2)`.
+:::
+
+Let's see another intriguing example:
+
+```cpp
+template <typename T, typename U> void foo(T, U);   // 1
+template <typename T, typename U> void foo(T*, U*); // 2
+template <> void foo<int*, int*>(int*, int*);       // 3
+
+int x;
+foo(&x, &x);
+```
+
+My attempt: Overload resolution would kick in to see which of 1, 2 is more specialized. Now, If U1, U2 are put in option 2, the arguments are U1*, U2*. This can be deduced in 1 if U1*, U2* is put into template args of option 1. The opposite is NOT true. Thus, option 2 wins.
+
+Now the interesting part here is that the explicit specialization has `<int*, int*>` as the template args. Now, that is incompatible with overload 2 (passing `<int*, int*>` would make the args as `int**, int**`). Thus, 3 is simply not compatible with the winning overload resolution. Thus, the final version selected is `2`.
+
+### Two-phase name lookup
+
+:::important
+Resolution of dependent names is postponed until substitution.
+:::
+
+- Phase 1; Before instantion: General syntax checks, **non-dependent names resolved**
+- Phase 2; After instantion: Special syntax checks, **dependent names resolved**
+
+Examples of a dependent and non-dependent name are shown:
+
+```cpp
+template <typename T>
+struct Foo {
+    int use1() { return illegal_name; } // non-dependent
+    int use2() { return T::illegal_name; } // dependent
+};
+```
+
+#### What exactly is a "dependent" name
+
+- If the type involves a template parameter: `T::x`. Then the type itself is dependent
+- An expression is type-dependent if its type is dependent too. `p->f()` is dependent if p is dependent.
+
+The classic **TS problem** is shown below:
+
+```cpp
+template <typename T> void foo(T) { cout << "T"; }
+struct S { };
+template <typename T> void call_foo(T t, S x) {
+    foo(x);
+    foo(t);
+}
+
+void foo(S) { cout << "S"; }
+void bar(S x) {
+    call_foo(x, x); // what happens here?
+}
+```
+
+My attempt: Since resolution is not going to be done until substitution. I think that phase 1 will quickly resolve `foo(x)`. Because `foo(x)` is not a dependent name. Thus, `foo(x)` picks the only overload available, which is `foo<S> { cout << "T"; }`. Then, since `foo(t)` is a dependent name; it will not be resolved until substition.
+
+Finally, substitution happens inside `bar()`, where the type deduction uses `T=S` and `foo(t)` uses the `foo(S)` overload, since that is now already reachable. Thus, `foo(t)` becomes `foo(S)`. The final output is: `T S`.
+
+Let's take it up a notch. What about this:
+
+```cpp
+template <typename T> void foo(T) { cout << "T"; }
+using S = int; // CHANGED!
+
+template <typename T> void call_foo(T t, S x) {
+    foo(x);
+    foo(t);
+}
+
+void foo(S) { cout << "S"; }
+void bar(S x) {
+    call_foo(x, x); // what happens here?
+}
+```
+
+My attempt: This is weird. We have a `using` declaration for the name `S`. Obviously, `foo(x)` is still non-dependent. So it prints `T`. But, the second call, `foo(t)`... is still dependent. Hmmm... I think it should print `T S` again?
+
+It doesn't, it prints `T T`. How?! That is because the real two-phase lookup looks a little different.
+
+:::important
+Dependent names are actually looked up twice. Thus, first, the name lookup found for `foo(t)` finds `foo(T)`! Then, at the call site inside `bar()`.
+:::
+
+:::warning
+I have NOT finished the lecture entirely yet. I feel like from lectures 3 to 6, I have taken in a bunch of information on type deduction. While it is super interesting, I will return to this probably after Lecture 10 since I would prefer to learn more concepts. 
+:::
+
+## Lecture 7+8: Modules
+
+What are the properties of objects and functions that are key to the physical organization of code? A function or a reference by the way is NOT an object, since they don't occupy memory.
+
+An object always has the following:
+
+- type
+- storage duration
+- size
+- alignment
+
+Sometimes the object may also have:
+
+- name
+- linkage
+- value
+
+For example:
+
+```cpp
+int* foo() {
+    int *p;
+    // pointer to an integer type
+    // automatic duration
+    // (depending on the compiler) 4 bytes
+    // idk about alignment
+    // name is p
+    // no linkage
+    // no value
+
+    p = new int{42};
+    // Here, new int{42} has no name
+    // dynamic storage duration
+    // (depending on the compiler) 4 bytes
+    // value of 42
+}
+```
+
+### Storage durations
+
+There are four of these:
+
+- static: Their lifetime starts when the program begins and ends when the program ends. All global variables have static duration.
+- dynamic: YOU are responsible for the lifetime.
+- automatic: Managed by the compiler.
+- thread
+
+:::important
+static storage duration is different from the static linkage. They are also different from static initialization.
+:::
+
+```cpp
+int f() { return 42; }
+extern int x;
+
+int y = x;
+int x = f();
+```
+
+In the above code, is y static init to 0, or dynamic init to 0 or 42? Similarly, is x static init or dynamic to 42. The answer: compiler dependent. Note that here x and y both have static duration (they both exist forever). But, x undergoes dynamic initialization. OTOH `y = x` is also dynamic. But which would happen first? Since these variables might sit in different translation units, the standard does not guarantee the order!
+
+#### Storage + linkage
+
+```cpp
+int f() { // no storage (not an object) + extern linkage
+    static int a = 42; // static storage with no linkage
+    return a++;
+}
+
+extern int x; // extern linkage
+static int y = x - f(); // static storage + static linkage
+int x = 42;  // static storage + extern linkage
+```
+
+### Linkage
+
+There are very few linkage types given in the standard.
+
+- external linkage: the name can be used in another TU
+  - extern "C" linkage: guarantees C-style name mangling (switches off templates, class methods etc).
+  - extern "C++" linkage: guarantees C++-style name mangling
+  - Always subject to ODR (unless specific exceptions apply)
+- internal linkage: name only usable in the same TU.
+- no linkage: name cannot be used outside the current scope
+- (Since C++20) module linkage!
+
+Lets practice, what linkage does each object here have:
+
+```cpp
+
+extern int x;                        // external
+int y;                               // external
+static int z;                        // internal
+
+extern int foo();                    // external
+template <typename T> int bar(T x);  // external
+static int buz();                    // internal
+
+void foo() {
+    extern int x;                    // internal
+    static int y;                    // none
+}
+
+struct S {
+    static int x;                    // external
+};
+```
+
+:::tip
+Linkage classes can be altered. Only the first declaration of the linkage class matters. If a later declaration tries to restrict the first one, it results in error; otherwise, the behaviour is unchanged.
+
+```cpp
+static int foo(); // first decl is internal linkage
+extern int foo() {
+    // still internal linkage because first
+    // one was intern linkage, the restriction
+    // cannot reduce
+    return 42;
+}
+
+extern int bar(); // first decl is external linkage
+static int bar() {
+    // THIS IS AN ERROR.
+    // We can restrict the linkage class from
+    // the first decl
+    return 42;
+}
+```
+
+:::
+
+#### Linkage issues
+
+```cpp
+// user.c
+extern int g;
+
+int foo();
+void inc() {
+    g += foo();
+}
+
+// first.c
+int g = 5;
+int foo() {
+    return 42;
+}
+
+// second.c
+int g = 14;
+int foo() {
+    return 67;
+}
+```
+
+The above files would individually compile just fine. The problem comes during linking. There are multiple conflicting definitions of `g` and `foo`. In fact, sometimes the linker might pick the first definition it sees and ignore the rest. The linking wouldn't even show an error and just generate a binary, the behaviour of this binary although might be really unpredictable!
+
+Thus, we have the "One definition Rule". It has two parts:
+
+- Within a TU, there shall not be more than one definition of a variable, function, class type, enum, template etc.
+- Every program shall contain **exactly one definition** of a non-inline function or variable (used outside a discaded statement).
+
+This is very very subtle. Image a header file like the one shown below. Definition of `int x` and then inclusion of the header file in multiple TUs can cause an ODR violation. `#pragma once` won't protect us either since it only protects from multiple inclusions WITHIN a TU, not ACROSS TUs.
+
+```cpp
+// header.h
+
+#pragma once
+
+int x; // potential ODR issue
+int foo(int n) { return n; } // potential DOR issue
+
+struct S {
+    int x; // ok, ITS NOT A NON-INLINE FUNCTION OR VARIABLE!!
+};
+```
+
+Note that types with the same name must be character by character identical (ignoring whitespaces and comments of course) in every TU.
+
+#### inline
+
+```cpp
+// header.h
+#pragma once
+inline int foo(int n) { return n; } // ok, ODR exempt
+static int foo(int n) { return n; } // ok, multiple defs
+```
+
+Adding the `inline` keyword tells the linker, "I know there are multiple defs of this, I promise that they are all the same. Keep one, discard the rest". In The end, there is only 1 `foo` in the final binary. OTOH, `static` makes it private to the TU, Every `.cpp` file that includes this header *has its own private copy of this function*. Thus, if there are 10 files including this header, there will be 10 different `foo`s in 10 different memory addresses.
+
+#### Specialization and inline
+
+```cpp
+template <typename T> T foo(T);
+
+template <> int foo<int>(int); // potential ODR violation
+template <> inline double foo<double>(double); // ok!
+```
+
+:::important
+Implicit instantiations are exempt from ODR anyways. BUT, explicit specializations need to be marked with an `inline` keyword.  
+:::
 
