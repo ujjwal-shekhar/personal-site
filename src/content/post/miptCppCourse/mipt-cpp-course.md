@@ -2316,7 +2316,9 @@ In general, try to include your own header before any other header includes in t
 ```cpp
 // foo.h
 #pragma once
+```
 
+```cpp
 // foo.cc
 #include "foo.h"
 #include "bar.h"
@@ -2325,7 +2327,6 @@ In general, try to include your own header before any other header includes in t
 Also, cyclic dependencies must be eliminated. An example of such a cyclic dependency is shown below:
 
 ```cpp
-
 // bar.cc
 #include "bar.h"
 #include "foo.h"
@@ -2333,9 +2334,9 @@ Also, cyclic dependencies must be eliminated. An example of such a cyclic depend
 namespace B {
     int bar(); // uses A::foo;
 }
+```
 
-/****/
-
+```cpp
 // bar.cc
 #include "foo.h"
 #include "bar.h"
@@ -2365,7 +2366,9 @@ int foo(); // internal detail, not visible outside module
 export int bar(int* a) { // visible as an exported thing
     return foo(); // uses foo, but this is fine
 }
+```
 
+```cpp
 // module_user.cc
 import afx2; // Looks a lot like a PCH
 ```
@@ -2383,7 +2386,9 @@ What would these "fully local" symbols get? They need to compiled into the modul
 export module A;
 struct Y; // tries fwd decl'ing from B
 export struct X { Y* p; };
+```
 
+```cpp
 // B.cppm
 export module B;
 struct X; // tries fwd decl'ing from A
@@ -2416,7 +2421,9 @@ export module afxm;
 export int foo() {
     return RETVAL;
 }
+```
 
+```cpp
 // main.cpp
 #define foo bar
 import afxm;
@@ -2437,7 +2444,9 @@ Thanks to the abandoning of the macro state export, each module is precompiled a
 
 // m1.cppm
 export module m1;
+```
 
+```cpp
 // m2.cppm
 export module m2;
 export import m1; // Transitive import!
@@ -2501,7 +2510,9 @@ Some rules are followed for the third `export`:
     // M1.cppm
     export module M1;
     export int foo() { return 14; }
+    ```
 
+    ```cpp
     // M2.cppm
     export module M2;
     import M1; // imports the exported foo().
@@ -2518,11 +2529,15 @@ Some rules are followed for the third `export`:
     // M1.cppm
     export module m1;
     export int foo() { return 14; }
+    ```
 
+    ```cpp
     // M2.cppm
     export module m2;
     export int foo() { return 42; }
+    ```
 
+    ```cpp
     // main.cpp
     import M1;
     import M2;
@@ -2586,7 +2601,9 @@ Even though visibility is a property of names, it isn't really defined. A name i
 export module afxm;
 struct X;
 export using Y = X;
+```
 
+```cpp
 // main.cpp
 import afxm;
 X x; // FAILS: X is a name with module linkage, not visibile
@@ -2613,7 +2630,9 @@ A declaration is reachable if it is reachable from any point in the instantiatio
 namespace N {
     int g(X);
 }
+```
 
+```cpp
 // m1.cppm
 module;
 #include "foo.h"
@@ -2642,7 +2661,9 @@ export template<typename T>
 int bar() { return 1; }
 
 template <> int bar<int>() { return 2; }
+```
 
+```cpp
 // main.cpp
 import afxm;
 bar<int>(); // returns 2
@@ -2680,13 +2701,17 @@ export module component;
 int bar(int x);
 int baz(int x);
 int foo(int x) { return bar(x) - baz(x); }
+```
 
+```cpp
 // component-bar.cc
 module component;
 int bar(int x) {
     //....
 }
+```
 
+```cpp
 // component-baz.cc
 module component;
 int baz(int x) {
@@ -2704,11 +2729,15 @@ export module C;
 
 export import :A;
 export import :B;
+```
 
+```cpp
 // A.cppm
 export module C:A;
 // Read C:A as "module A is the internal partition of module C"
+```
 
+```cpp
 // B.cppm
 export module C:B;
 ```
