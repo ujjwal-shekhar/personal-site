@@ -2270,3 +2270,673 @@ template <> inline double foo<double>(double); // ok!
 Implicit instantiations are exempt from ODR anyways. BUT, explicit specializations need to be marked with an `inline` keyword.  
 :::
 
+#### What exactly is "ODR-used"?
+
+:::tip
+Informally, this means "definition required here".
+:::
+
+```cpp
+
+struct S {
+    static const int n = 5; // declaration!
+}
+
+// If the declaration already contains
+// enough information for the expression
+// then we don't need a "definition".
+// Thus, the next example is not an
+// ODR-usage
+int x = S::n + 1; // not ODR-used!
+
+// However, in the next line, we take the
+// address of something that was never 
+// defined
+int y = foo(&S::n) + 1; // ODR-usage here
+// Since the address is taken for an entity
+// never defined, the program is ill-formed.
+
+// However, defining the entity first and then
+// using it is considered alright
+const int S::n; // defined!
+int z = foo(&S::n) + 2; // no ODR violation!
+
+```
+
+#### What exactly is a "discarded statement"?
+
+:::tip
+Informally, this means "not crossed out by `constexpr`".
+:::
+
+### Components
+
+In general, try to include your own header before any other header includes in the module. This also ensures that a stray `#ifdef` or something similar doesn't completely alter the behaviour of the program. 
+
+```cpp
+// foo.h
+#pragma once
+
+// foo.cc
+#include "foo.h"
+#include "bar.h"
+```
+
+Also, cyclic dependencies must be eliminated. An example of such a cyclic dependency is shown below:
+
+```cpp
+
+// bar.cc
+#include "bar.h"
+#include "foo.h"
+
+namespace B {
+    int bar(); // uses A::foo;
+}
+
+/****/
+
+// bar.cc
+#include "foo.h"
+#include "bar.h"
+
+namespace A {
+    int foo(); // uses B::bar;
+}
+```
+
+In these situtations, there are two options to fix the problem. Either, you separate out the dependency into a third module. Or, you combine the tightly bound dependencies into one component! Moreover, any entity that is declared in the module's header must be defined in the implementation file, and vice-versa.
+
+#### Try not to `#include` when possible (really?)
+
+Typically, they add more dependencies. Not just in the file where a dependency is added, but to every file that will include the file from here! Isn't this strange? We wish to not `#include` just to speed up compilation, but we wish to have good component-based design too.
+
+This problem has infact been solved a long time ago. Pre-compiled headers make it possible to just have compilation done until a certain point already (upto the syntax tree stage). A bunch of things, like the compile-time options and the modification times of the header file `.h` and the corresponding precompiled header file `.pch`.
+
+The slight downside, is that with a precompiled header you always have to do a fork-join. All headers would be included into the PCH and then the PCH would be included into the source files. This limits the parallelizability of the compilation of each source file.
+
+In these PCHs, the issue is that there is no real way of making an internal function truly unreachable/invisible when exporting it. This motivates us to look into `module`s. We wish to use the language to mark EXPLICITLY anything that should be visible/reachable. It would look like:
+
+
+```cpp
+// afx2.cppm
+export module afx2;
+int foo(); // internal detail, not visible outside module
+export int bar(int* a) { // visible as an exported thing
+    return foo(); // uses foo, but this is fine
+}
+
+// module_user.cc
+import afx2; // Looks a lot like a PCH
+```
+
+Realize that no macro states are being imported here, none of the internal functions like `foo()` are visible to the module user at all. Working with modules is surprisingly similar to working with PCHs.
+
+### Modules
+
+#### Linkage of non-exported symbols
+
+What would these "fully local" symbols get? They need to compiled into the module's implementation and source code, but the symbols should NOT be visible since they aren't exported. A symbol has module linkage, if it can be used within the same module. This is sort of in between external and internal linkages.
+
+```cpp
+// A.cppm
+export module A;
+struct Y; // tries fwd decl'ing from B
+export struct X { Y* p; };
+
+// B.cppm
+export module B;
+struct X; // tries fwd decl'ing from A
+export struct Y { X* p; };
+```
+
+The above example shows this new kind of linkage in action. The non-exported symbols `X` and `Y` are different from the exported ones. And thus fwd declaring non-exported symbols across modules does nothing, since they are unrelated.
+
+#### Problem with the macro state
+
+When there exists a preprocessor, the macro state can be altered at any point of inclusion, as shown below:
+
+```cpp
+#define MYDEF 1
+
+#include "something.h"
+
+#if defined(MYDEF)
+// is the macro still defined?
+// what if "something.h" had a #define MYDEF 0?
+#endif
+```
+
+There is no reliable way when dealing with headers to keep the macros within boundary. The issue is even more blatant with PCHs, since it is a single unit and always comes first. But what if we refuse to include the preprocessor state at all?
+
+```cpp
+// afxm.cppm
+export module afxm;
+#define RETVAL 14
+export int foo() {
+    return RETVAL;
+}
+
+// main.cpp
+#define foo bar
+import afxm;
+#undef foo
+
+#ifndef RETVAL
+#define RETVAL 42
+#endif
+
+///////
+// foo() returns 14
+// RETVAL returns 42
+```
+
+Thanks to the abandoning of the macro state export, each module is precompiled and can have an import as part of its internal state too
+
+```cpp
+
+// m1.cppm
+export module m1;
+
+// m2.cppm
+export module m2;
+export import m1; // Transitive import!
+
+/*
+Now, import m2 will also import m1
+*/
+```
+
+#### Preamble + Purview
+
+The structure of a module file has the following three parts:
+
+```cpp
+export module name;
+
+// preamble
+// ALL IMPORTS (including transitive)
+//
+
+// purview
+// EVERYTHING ELSE (including exported ones)
+//
+```
+
+Because of this, the keyword `export` occurs in different contexts. This is similar to the `static` keyword!
+
+- `export module axf;` marks the module's export unit.
+- `export import m1;` handles transitive imports. (preamble)
+- `export int x;` marks entitires as exported. (purview)
+
+Some rules are followed for the third `export`:
+
+- All `export`ed declarations must appear only within a module's purview.
+- `export` must not change the linkage of the name:
+
+    ```cpp
+    export module afxm;
+
+    namespace {
+        export int a; // ERR: internal linkage -> external not allowed
+    }
+
+    int b;
+    export namespace N {
+        using ::b; // ERR: module linkage -> external not allowed.
+    }
+    ```
+
+- `export` doesn't create a namespace for you. Something like this has the usual ODR restrictions:
+
+    ```cpp
+    export module afxm;
+    export int n; // this is NOT afxm::n or something! It's a global name as it would be in any TU.
+    ```
+
+- The compiler will forbid any cyclic dependencies.
+- The compiler will diagnose any name conflicts:
+
+    ```cpp
+    // M1.cppm
+    export module M1;
+    export int foo() { return 14; }
+
+    // M2.cppm
+    export module M2;
+    import M1; // imports the exported foo().
+    
+    export int foo() { return 42; }
+    // conflicts as a "re-definition" due to the
+    // same signature now being seen in the same TU
+    // by the compiler
+    ```
+
+- The compiler will also diagnose name conflicts in sibling modules (nodules that don't import each other):
+
+    ```cpp
+    // M1.cppm
+    export module m1;
+    export int foo() { return 14; }
+
+    // M2.cppm
+    export module m2;
+    export int foo() { return 42; }
+
+    // main.cpp
+    import M1;
+    import M2;
+
+    // ERR: foo() is attached to one module
+    // can't attach it to another
+    ```
+
+### Attached names
+
+The declaration is said to be "attached" to the module in who's purview it appears. Exceptions are:
+
+- `export namespace X {}`: namespace definitions with external linkage are attached to the global module.
+- `export extern "C" int foo();`: declarations without a linkage spec are also attached to the global module.
+- Some cases of non-dependent friend decls, which I will skip`:)`.
+
+### Headers inside modules?
+
+```cpp
+export module m1;
+#include <array>
+```
+
+The above is a really bad idea, as it will put symbols from `std::array` into the purview of a module. The `extern "C"` linkage declarations might start clashing everywhere. Someone came up with an idea:
+
+:::tip
+What if we try to (logically) "import" the header file. Not like including the contents of it textually, but more smartly while preserving the precompilability of the standard lib?
+:::
+
+This yields a new preprocessing directive `import <>`. If the compiler sees `import <array>;`, it first checks for cached work. If not, then it precompiles it and injects it into the module with internal linkage!
+
+:::warning
+This is unfortunately not a very good solution. It's slow, and uncontrolled and slow because of it's overreliance on cached definitions.
+
+```cpp
+import mymodule; // controlled, normal
+import <mymodule>; // uncontrolled, legacy
+```
+:::
+
+#### Global fragment
+
+We can add all of the includes to the GMF (global module fragment), like shown:
+
+```cpp
+module;
+#include <string>
+
+export module m1;
+int foo(const std::string& blah) {}
+```
+
+Nothing except pre-processing directives can go to the global module fragment. GMF allows us to have a macro state, but omit propagating it to whoever imports us.
+
+### Visibility and Reachability
+
+Even though visibility is a property of names, it isn't really defined. A name is visible if it can be found by name lookup. For example:
+
+```cpp
+// afxm.cppm
+export module afxm;
+struct X;
+export using Y = X;
+
+// main.cpp
+import afxm;
+X x; // FAILS: X is a name with module linkage, not visibile
+Y y; // OK: Y is exported so its visible to anyone importing
+```
+
+The above example is really interesting because the declaration `using Y = X;` was reachable by `main.cpp` even though one of the symbols in that expression, `X`, wasn't. According to the standard, a declaration `D` is reachable from a point `P` if:
+
+- It appears before `P` in the same TU.
+- It is *not* discarded, and appears in a TU that is reachable from `P`. 
+
+A declaration is reachable if it is reachable from any point in the instantiation context. Moreover, a declaration `D` in a GMF is discarded if `D` is not `decl-reachable` from any declaration in the decl-seq of the TU. Intuitively, `decl-reachable` means *used in some way that allows us to determine that this decl was the one being used*.
+
+:::important
+
+- A name can be reachable even if it isn't exported.
+- A name can be reachable even if it isn't visible to name lookup.
+- The only case where a name is not reachable is when it is explicitly discarded.
+
+:::
+
+```cpp
+// foo.h
+namespace N {
+    int g(X);
+}
+
+// m1.cppm
+module;
+#include "foo.h"
+
+export module m1;
+template<typename T> int use_g() {
+    N::x x; // N::x, N, :: are all decl-reachable from use_g
+    // The compiler doesn't need to do its usual gymnastics
+    // like the two-phase lookup etc. The declaration is itself
+    // making it clear that N::x is the EXACT name to be used.
+
+    return g((T(), x)); // g is NOT decl-reachable from use_g
+    // Here, the compiler has no idea what `g` is referring to
+    // it will later rely on the two-phase lookup etc for this.
+}
+```
+
+#### Reachability and Specialization
+
+Even though a specialization might be not visible, the compiler can still find it reachable and use it!
+
+```cpp
+// afxm.cppm
+export module afxm;
+export template<typename T>
+int bar() { return 1; }
+
+template <> int bar<int>() { return 2; }
+
+// main.cpp
+import afxm;
+bar<int>(); // returns 2
+// Even though the specialization is
+// invisible, it is still reachable
+// via name-lookup
+```
+
+#### Manual unreachability
+
+While there are ADL hacks and other wizadry to do this, the language provides us with a _private fragment_ to mark things absolutely unreachable. Thus, the final structure of a module would look like:
+
+```cpp
+
+module;
+// Global module fragment
+// preprocessing directives only!
+
+export module name; // name
+// imports: preamble
+// exports/decls: purview
+
+module : private;
+// Private module fragment
+// for manual reachability restrictions
+```
+
+### Using modules in the component-based approach
+
+A single module can span multiple TUs. Although, only one of them can be the interface unit. So, one way to arrange them would be:
+
+```cpp
+// component.cppm
+export module component;
+int bar(int x);
+int baz(int x);
+int foo(int x) { return bar(x) - baz(x); }
+
+// component-bar.cc
+module component;
+int bar(int x) {
+    //....
+}
+
+// component-baz.cc
+module component;
+int baz(int x) {
+    //....
+}
+```
+
+#### Partitions
+
+What if we wish to make module `C` use module `A`. But, we don't want users to directly import module `A`. This where partitions can be used.
+
+```cpp
+// C.cppm
+export module C;
+
+export import :A;
+export import :B;
+
+// A.cppm
+export module C:A;
+// Read C:A as "module A is the internal partition of module C"
+
+// B.cppm
+export module C:B;
+```
+
+#### BMI files
+
+Its called `.pcm` on Clang, `.gcm` on GCC and `.ifc` on MSVC. It is an artifact created by the compiler to represent a module unit. It holds internal compiler-specific data structures like the AST, metadata, some machine code (obj files) etc.
+
+If the BMI is compiler specific, how do we distribute modules? The discussion goes into build systems in general, which I have omitted for now (watched, but not made notes for).
+
+:::caution
+Note to self: I should try deepdiving into Makefiles for sure. Not to excruciating detail but definitely enough to understand what's going on.
+
+I might do the NFS+Cshell project using CMake though, because its more modern.
+:::
+
+### Homework
+
+Crazy project, I will do this without using AI probably to get better. Will get to this later though.
+
+### Extra Reading
+
+#### Andreas Weis: Getting started with C++ Modules, CppCon 2023
+
+#### Anton Polukhin: C++20 Modules: practical adoption, C++ Zero Cost Conf 2025
+
+
+## Lecture 9: SFINAE
+
+### What is "trivially copyable"
+
+Intuitively, anything that can be `memcpy`ed. A class is trivially copyable if it has at least one trivial copy/move ctor/assignment operator and a trivial non-deleted dtor.
+
+A ctor is trivial if:
+
+- There are no virtual methods or virtual bases.
+- All direct bases are also trivial.
+- Non non-static data members have default member initializers.
+
+If you are already using a user-defined dtor or a virtual function (forcing the compiler to manage a vtable), the class cannot be copied bit-by-bit safely using `memcpy`. In the video, Professor shows us that the compilers don't even fully agree on what is trivially copyable and what isn't, this is really non-trivial (pun intended `:p`).
+
+#### Understanding `std::is_trivially_copyable_v<>`
+
+If you begin to think of how you would implement this... You just can't! Only the compiler's intrinsics would know for sure.
+
+:::caution[I feel like I can though??]
+I am a little startled by this though. Technically, all the checks that were mentioned in the standard can be done at compile-time using reflection now. Which implies that the compilers would have had a *good* way of doing this so far. Why is it that we can't just replace this with a frontend reflection framework instead of a compiler intrinsic?
+:::
+
+Any type trait, generally, maps a type to a value. `std::is_void<T>` maps any `T -> (true, false)`. You can do the opposite too, using `std::integral_constant<T, T v>` which assigns the value back to the type. The two most useful cases are:
+
+```cpp
+using true_type = std::integral_constant<bool, true>;
+using false_type = std::integral_constant<bool, false>;
+```
+
+Using these, we can write the type trait of `std::is_same<T, U>` (left as an exercise, use partial spec). How do you make a type trait that does `add_lref`? A first attempt could look like:
+
+```cpp
+template <typename T>
+struct add_lref { using type = T& };
+
+template <typename T>
+using add_lref_t = add_lref<T>::type;
+```
+
+But then, this would accept the type `void`. However, it is well known that `void&` and `const void&` are invalid types. A way to circumvent this might be to add full specializations:
+
+```cpp
+template <typename T>
+struct add_lref { using type = T& };
+
+template <>
+struct add_lref<void> {
+    using type = void;
+}
+
+template <>
+struct add_lref<const void> {
+    using type = const void;
+}
+
+template <typename T>
+using add_lref_t = add_lref<T>::type;
+```
+
+But... are we certain that `void` is the only type that needs to be exempted? What if there are other types in the future too, this would add an additional maintenance overhead. There should be a better way to do something like "if it is valid, do `T&` else leave it as `T`". And indeed there is, tag dispatch! We can use a helper template to check if the ref is valid:
+
+```cpp
+template <typename T, typename Enable>
+struct __add_lref {
+    using type = T;
+}
+
+template <typename T, std::remove_reference_t<T&>>
+struct __add_lref {
+    using type = T&;
+}
+
+template <typename T>
+struct add_lref : __add_lref<T, std::remove_reference_t<T>> {}
+```
+
+This looks very clunky and isn't as obvious. But, this uses one of the most important rules of C++: SFINAE. The program is not ill-formed because a substitution fails. Here, `template <typename T, std::remove_reference_t<T&>> struct __add_lref` would be invalid for `void` because technically, `void&` would be invalid. However, the compiler discards this template and moves on to find the others. This is interesting because not all cases of a compiler error will trigger SFINAE:
+
+```cpp
+int negate(int i) { return -i; }
+
+template <typename T>
+T negate(const T& t) {
+    typename T::value_type n = -t();
+    return n;
+}
+
+// float doesn't have a `value_type`
+auto v = negate(2.0);
+```
+
+Even though this is a compilation error, there is NO error in the first (template substitution) phase. The error only happens during the second phase where we are looking at the function body. This is not SFINAE, and will simply do a compile-time error.
+
+### Three fundamental domains
+
+There are three separate domains:
+
+- Type space (`int`, `long long`, `double`,...).
+- Value space (`a`, `1`, `"hello world"`,...).
+- SFINAE space ("validity")
+
+You can go from any space to another using various methods. A method to go from the type space to the validity (SFINAE) space is to use `std::void_t`. It is implemented as:
+
+```cpp
+template <typename ...> using void_t = void;
+```
+
+This maps any pack of types to enabled if each of the params are valid. This makes our intent clear, to continue the `add_lref` example:
+
+```cpp
+template <typename T, typename Enable>
+struct __add_lref { using type = T; };
+
+template <typename T, std::void_t<T&>>
+struct __add_lref { using type = T&; };
+
+template <typename T, std::void_t<T>>
+struct add_lref : __add_lref<T, void> { };
+
+template <typename T>
+using add_lref_t = add_lref<T, void>;
+```
+
+But wait, we have seen better ways of avoiding specific specializations right? That's right, concepts!
+
+```cpp
+template <typename T>
+struct add_lref { using type = T; };
+
+template <typename T>
+requires requires (T& t) { t; }
+struct add_lref { using type = T& };
+
+template <typename T>
+using add_lref_t = add_lref<T, void>;
+```
+
+Yes, it is true, that we have more modern alternatives to SFINAE for many cases now. But it was there BEFORE those features existed. A large number of features of `concept`s anre `require`s clauses were earlier implemented using `enable_if` instead. In fact, if you see a part of code that uses SFINAE then that is a strong sign of the fact that the language is missing something.
+
+#### Interesting ODR violations
+
+The following code gives an ODR violation because the signatures look the same even though the `enable_if` conditions are different.
+
+```cpp
+template <typename T, typename = enable_if_t< sizeof(T) > 4 >>
+int foo (int x) {}
+
+template <typename T, typename = enable_if_t< sizeof(T) <= 4 >>
+int foo (int x) {}
+
+// ERR: `foo` is redefined!
+```
+
+So, as a workaround we want to put the `enable_if` into the signature. Let's just use the fact that `enable_if_t` is just a type and pass the type's pointer as a dummy.
+
+```cpp
+template <typename T, enable_if_t< sizeof(T) > 4 >* = nullptr>
+int foo (int x) {}
+
+template <typename T, enable_if_t< sizeof(T) <= 4 >* = nullptr>
+int foo (int x) {}
+```
+
+Again, PLEASE just use the `requires` clauses because that is modern, intended solution for these problems.
+
+```cpp
+template <typename T>
+requires (sizeof(T > 4))
+int foo (int x) {}
+
+template <typename T>
+requires (sizeof(T <= 4))
+int foo (int x) {}
+```
+
+:::caution[Haggin's trick for `void_t`]
+I won't go into details of this but adding things like `std::void_t<typename T::x>` don't work because the `T::x` part is not done until the type alias is alive.
+
+To fix this, you can "materialize" the `void_t` by creating a dependent type like:
+
+```cpp
+template <typename ...>
+struct Void : std::type_identity<void> {};
+
+template <typename ...Args>
+using Void_t = typename Void<Args...>::type;
+```
+
+Now, `Void_t<typename T::x>` can be used. Again, please just use requires clauses `_/\_`. I am also skipping the discussion on the `move_only_function` for now, will get to it if I later feel the need to.
+:::
+
+### Classical meta-progamming
+
+You can find all primes at compile-time. The actual factorial computation could be forced to happen at compile-time:
+
+```cpp
+template <size_t N>
+struct Fact : std::integral_constant<size_t, N * Fact<N - 1>> {};
+
+template <>
+struct Fact<0> : std::integral_constant<size_t, 1> {};
+```
+
+
