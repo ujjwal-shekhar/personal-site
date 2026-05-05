@@ -2,7 +2,7 @@
 title: "Notes from the Master's Course in C++ (MIPT, 2025-2026)"
 description: "An advanced deep dive into a lot of the C++ internals. I also work out all the assignments here."
 publishDate: "26 Oct 2025"
-updatedDate: "29 March 2026"
+updatedDate: "5 May 2026"
 tags: ["c++", "compilers", "lang-features"]
 pinned: true
 ---
@@ -2968,4 +2968,543 @@ template <>
 struct Fact<0> : std::integral_constant<size_t, 1> {};
 ```
 
+Just like our discussion with `requires` clauses and SFINAE, we eventually came up with `consteval` to patch the gap that was earlier filled by this kind of template metaprogramming. We discuss a little bit about other metaprogramming attempts like `Loki`, `Boost::Fusion`, `Boost::mpl` and `Boost::Fusion::adapt_struct`. I won't put details on them here, because the metaprogramming situation post-reflection very different. Of course, if needed I shall return to this. I will also not go into the extra readings for now. In the future, when I need to go through template metaprogamming specifically I will probably go into the following:
 
+- Arthur O'Dwyer: "A Soupcon of SFINAE" Cppcon 2017 (for SFINAE)
+- Louis Dionne: "Metaprogramming in C++14" ACCU 2017 (for template metaprogramming)
+
+## Lecture 10 + 11: All about `constexpr`
+
+Let's see the example below. Which of the three options compile?
+
+```cpp
+#include <array.h>
+
+// Works
+const int count = 3;
+std::array<int, count> = x{1, 2, 3};
+
+// Works
+const long lcount = 3;
+std::array<int, static_cast<int>(lcount)> = xl{1, 2, 3};
+
+// Doesn't work, static cast from double to int
+const double dcount = 3;
+std::array<int, static_cast<int>(dcount)> = xd{1, 2, 3};
+```
+
+Now, some odd things here are that `std::array` should need a compile time value for the size parameter. How is it that the `const int` even fits? It is not marked `constexpr`. The compiler says that the things that can be used in a `constexpr` context are:
+
+- Marked `constexpr` (duh).
+- Non-volatile constant literal
+- Template param
+- String literal
+- Reference or Non-mutable subobject of any of the above
+
+### Case for `constinit`
+
+Here, the `arr2` case compiles on Clang because the compiler thinks that it is a variable length array!
+
+```cpp
+struct A { static const int sz = 256; };
+const int tsz = 4 * A::sz;
+int arr1[tsz]; // Ok, CT constant
+
+struct B { static const int sz; };
+const int tsz2 = 4 * B::sz;
+const int B::sz = 256;
+int arr2[tsz2];
+```
+
+The compiler sees that the `B::sz` value is not really known at `tsz2` so, it defaults to assuming that this is a C99-style dynamic array.
+
+:::note
+I actually never realized that if you leave a `static const` variable declared but not defined, there is exactly ONE time that you can define it later, which is what we see in the `const int B::sz = 256` line. Note, that we didn't say `B::sz = 256` because that would imply a run-time assignment (not possible due to the constness of `B::sz`) here.
+:::
+
+This problem can be fixed using `constinit`, it forces compile-time initialization of static or thread-local variables. This prevents something called the _static initialization order fiasco_. Also, since `constinit` is a subset of `constexpr`, the below fix works by replacing `constinit` with `constexpr` too.
+
+```cpp
+struct A { constinit static const int sz = 256; };
+constinit const int tsz = 4 * A::sz;
+int arr1[tsz]; // Ok still
+
+struct B { constinit static const int sz; };
+constinit const int tsz2 = 4 * B::sz;
+constinit const int B::sz = 256;
+int arr2[tsz2]; // Atleast NOT VLA
+```
+
+:::note
+I feel like I should dig a little deeper into the `constinit` business to truly understand the _static init order fiasco_. Also, `constinit` string literals are not allowed.
+:::
+
+### Restrictions on `constexpr`
+
+`constexpr` floating point literals are allowed but no recommended. The compile-time and run-time values might silently diverge. You cannot make non-static data members `constexpr` (because that wouldn't make sense, just make it `static` at that point). You can't make function parameters `constexpr` either.
+
+Even `if constexpr` has its limits. The branches can only be discarded for template instantiations. It can't just do away with branches anywhere. Because the branches are removed in the second phase of template checking. Semantic text in a non-template case for the compiler is fully "known". Even if the branch is to be discarded, it cannot be ill-formed. In the case of template instantiation, the compiler would have suppressed that error.
+
+```cpp
+auto foo() {
+    auto value = 100; // deduces to int
+    if constexpr (std::is_pointer_v(decltype(value))) {
+        return *value; // Err
+    } else {
+        //...
+    }
+}
+```
+
+You can even mark functions as `constexpr` to make them executable at compile-time. It used to have an absurd limit in C++11, where you could only have a single return statement in functions marked `constexpr`. In C++14 this was relaxed. Eventually more restrictions were relaxed too (and are still being slowly removed). Notably, now we can use `new` and `delete` inside `constexpr` functions, lambda expressions are now allowed too, `const_cast` and `reinterpret_cast` are allowed as well. Among others!
+
+Interestingly, even though `throw`s aren't allowed in `constexpr` contexts, we can use the fact that `constexpr` blocks are lazily evaluated. In the code snippet shown, only when `N` becomes zero is the `throw` path taken. When this happens you hit a compile-time error with that line (and the error message beside it).
+
+```cpp
+constexpr size_t static_log(size_t N) {
+    if (N == 0) 
+        throw "N == 0 not supported"; // Path A
+    return 1;                         // Path B
+}
+
+static_log(10); // Path A does not even compile
+static_log(0); // Path A compiles, throw not allowed in constexpr, CT err
+```
+
+This is even better than a `static_assert`. It would only work on values that at CT, but this gives us a function that can be called on runtime values too. Now, with modern C++, we can use `constexpr` functions OUTSIDE of CT contexts too. The `constexpr` annotation just says *if the function is called in a CT context, sure we will evaluate it at compile-time, else we will simply compile it into executable instructions and let it happen at run-time*. Imagine if we wanted to implement something like `countl_zero` now.
+
+```cpp
+template <typename T>
+concept unsigned_integral =
+    std::integral<T> && std::is_unsigned_v<T>;
+
+constexpr countl_zero(unsigned_integral auto x) {
+    /*
+    if (compile time) {
+        Whatever, do a linear solution
+    } else {
+        Use an appropriate built-in call
+    }
+    */
+}
+```
+
+Question is, how do you write something like `if (compile time)`. You do it by writing `if consteval`. Which means that a `constexpr` function can properly segragate its dual behaviour into a code block for the runtime and for the compile time.
+
+```cpp
+template <typename T>
+concept unsigned_integral =
+    std::integral<T> && std::is_unsigned_v<T>;
+
+constexpr countl_zero(unsigned_integral auto x) {
+    if consteval {
+        Whatever, do a linear solution
+    } else {
+        Use an appropriate built-in call
+    }
+}
+```
+
+:::warning
+Please be reminded that the compiler does not "think" semantically about `constexpr`, it won't do complicated lookups and say "oh if this is inside `consteval` surely this variable is `constexp`".
+
+```cpp
+consteval bool negate(bool x) { return !x };
+
+template <typename P> constexpr int f(P pred) {
+    if constexpr (pred(true)) {
+        // ERR: pred is not constexpr
+    } else {
+        //...
+    }
+} 
+```
+
+Even though the predicate is a `consteval` marked function, *it is a parameter* and can never be used a constant expr. The fundamental rules of the syntax are still followed, as again, the compiler only does `constexpr` syntactically NOT semantically. To really really convince you of this:
+
+```cpp
+struct S {
+    int s_;
+    S(int n) : n_(n) {}
+    constexpr int get() { return 42; }
+};
+
+int main() {
+    S s{2};
+    constexpr int k = s.get(); // OK!
+}
+```
+
+It doesn't matter that `s` is instantiated at run-time, or that it is mutable. The compiler simply sees that `.get()` is syntactically not touching anything inside `S` and if it did, the error would be in the definition of `S::get()` and not at the call site `constexpr int k = s.get()`. Since the syntax is valid, the compiler accepts it as a valid constant expression.
+:::
+
+#### UB and `constexpr`
+
+In `constexpr` functions, UB is forbidden at compile time. This is weird, we learnt that the compiler doesn't think that UB exists in the first. How is it that the standard now says that UB shouldn't happen inside `constexpr` contexts?
+
+```cpp
+template <typename FwdIt, typename Value>
+consteval FwdIt static_find(FwdIt it, FwdIt fn, Value v) {
+    while ((v != *it) and (it != fn)) {
+        it++;
+    }
+    return it;
+}
+
+constexpr int a[] = {1};
+constexpr auto x = static_find(a, a + 1, 4);
+// ERR: OOB error happens at compile-time!
+```
+
+To some extent, the compiler turns into our own UB sanitizer and actually gives us a very good diagnostic.
+
+### User-defined literals
+
+If an object has a `constexpr` constructor, then that object is eligible to become a literal. This `constexpr` constructor would make the rest of the `constexpr` non-static methods meaningful.
+
+```cpp
+struct Complex {
+    constexpr Complex(double r=0.0, double i=0.0)
+        : re(r), im(i) {}
+
+    constexpr real() { return re; }
+    constexpr imag() { return im; }
+
+private:
+    double re, im;
+}
+```
+
+Infact, we can do compile-time arithmetic using `constexpr` operators as well.
+
+```cpp
+constexpr Complex& Complex::operator+=(Complex rhs) {
+    re += rhs.re;
+    im += rhs.im;
+    return *this;
+}
+
+constexpr Complex Complex::operator+(Complex lhs, Complex rhs) {
+    return Complex(
+        lhs.re + rhs.re,
+        lhs.im + rhs.ims
+    );
+}
+```
+
+But what if we wish to write `1.0 + 1.0i` to make it more "mathy". We can even make user-defined literal operators too.
+
+```cpp
+constexpr Complex operator ""_i (double arg) {
+    return Complex(0.0, arg);
+}
+
+constexpr Complex c = 1.0 + 1.0_i // OK!
+```
+
+:::note
+There is discussion on using a template arg pack of `char`s to write stuff like `_binary` suffix literal to prevent overflowing `10101011010101010_binary`. Where the actual binary number as a decimal should fit, but the part before the `_binary` suffix wouldn't. I am not going to put that here in detail, but for any future references I will dig further.
+:::
+
+I have always noticed that for `"hello"sv` and `"hello"s` and stuff we always need to put `using namespace std::string_literals` or `using namespace std::string_view_literals`. Unfortunately that is mandatory because ADL cannot find the literal operator since the associated namespace for fundamental types is `void`.
+
+### `constexpr` everything
+
+![A timeline of what types are `constexpr` now and will be in C++26](image-16.png)
+
+A lot of these like `std::map` and `std::set` become `constexpr` in C++26 because finally in `C++26` the restrictions on `reinterpret_cast` have been relaxed. Allocators are strongly dependent on using runtime polymorphism and `reinterpret_cast`s.
+
+As an aside, why do we even care about virtual `constexpr` functions? What does it even mean to have compile-time memory because what is a type erasure mechanism when there is no memory to point to? Answer is that you can still use them inside `constexpr` contexts. The fun part is that, since everything is still at compile-time, the compiler perfectly remembers the type and there is no vtable involved. It's a source of "fake" type erasure at compile-time.
+
+:::note
+I will not go into absolute details of this, feel free to check the lecture but in the example provided we look at a `constexpr` function that makes an array of base pointers, with a struct having `virtual constexpr` functions.
+:::
+
+Even more interesting, the `constexpr new`. You can do allocations and deallocations in a `constexpr` context now! And the Professor calls this the *cave of wonders*. You can go to the cave of wonders and alloc/dealloc any memory. This isn't "real" memory. The genie in the cave (compiler) will watch everything you do, and will absolutely not let you carry any memory outside of the cave. Trying to do so will kill your compilation immediately.
+
+```cpp
+consteval int* alloc() {
+    return new int{};
+}
+
+int main() {
+    // fail (obviously)
+    int x = *alloc();
+
+    // fail (still!!)
+    constexpr int* x2 = alloc();
+    delete x2; // YES you promised to delete it
+    // YES you took it within a constexpr context
+    // but no, this is still not allowed!
+    // the delete corresponding to the new must 
+    // be within the same evaluation context only.
+    // PLEASE be reminded that constexpr is NOT
+    // a semantic process, only syntactic.
+}
+```
+
+If you still wish to still take a *value* out. You can create a copy of it to return the value.
+
+```cpp
+consteval int* alloc() {
+    return new int{};
+}
+
+int main() {
+    int x = []() consteval {
+        int *p = alloc();
+        x = *p;
+        delete p;
+
+        return x; // OK: we are in the cave!
+    }
+```
+
+### Homework
+
+#### [HW8.1]
+
+In the following code Clang and GCC behave differently. Analyze which one is correct and why?
+
+```cpp
+struct S {
+    int : *new int{0};
+};
+
+enum E {
+    V = *new int{1};
+}
+```
+
+#### [HW8.2]
+
+In the following code Clang and GCC behave differently. Analyze which one is correct and why?
+
+```cpp
+struct Type {
+    int a; const int& b;
+    constexpr Type() : a(1), b(a) {}
+};
+
+constexpr auto get() { return Type(); }
+constexpr Type t2 = get(); // gcc error, clang ok
+constexpr int c2 = t2.a;
+```
+
+### `consteval` trit class
+
+How do you make a class that can represent trits (made from `{-1, 0, 1}`)as a literal? They come with nice properties like negation being swapping all `-1` with `1`. Dropping the fraction is always the nearest integer. Say we represent `-1` with `j`, we could make a user-defined literal as seen before to turn this into an integer. But then, we lose all the nice properties as shown above.
+
+So, we make a `consteval` trit. And we make the constructor `consteval`, and work with a private `std::vector<int>` for the digits.
+
+```cpp
+struct ct_trit {
+private:
+    std::vector<int> digits;
+public:
+    consteval ct_trit(const char* c, size_t len) {
+        for (size_t i=0; i<len; i++) {
+            switch (c[i]) {
+                case '0': digits.push_back(0); break;
+                case '1': digits.push_back(1); break;
+                case 'j': digits.push_back(-1); break;
+                default: throw "Only 0, 1, j are allowed.";
+            }
+        }
+    }
+};
+```
+
+To get the values into other forms, we define a conversion operator.
+
+```cpp
+struct ct_trit {
+private:
+    std::vector<int> digits;
+public:
+    template <typename T=int>
+    consteval operator T() const {
+        T ret = 0;
+        for (const auto digit : digits) {
+            ret = 3 * ret + digit;
+        }
+        return ret;
+    }
+};
+```
+
+Lastly, a literal suffix would seal the deal.
+
+```cpp
+struct ct_trit {
+private:
+    std::vector<int> digits;
+public:
+    consteval ct_trit operator ""_trit(const char* c, size_t len) {
+        return ct_trit{c, len};
+    }
+};
+```
+
+### `template for` in C++26
+
+This allows an iteration over things know at compile-time without any template recursion magic. For example, iterating over a parameter pack:
+
+```cpp
+template <typename... Ts>
+consteval void print_all(Ts... ts) {
+    template for (auto t : {ts...}) {
+        std::println("{}", t);
+    }
+}
+```
+
+Could you go over all enums? Yes! You must cross into the meta-world of CT reflection.
+
+```cpp
+constexpr auto r = ^^int; // r is a meta value
+// The compiler has all the meta information of
+// the `int` type, which you can query!
+```
+
+You can flip the meta operator to normal using splicers.
+
+```cpp
+using MyType = [: sizeof(int) < sizeof(long) ? ^^int : ^^long :]
+```
+
+This also works with indices. The implementation of `std::tuple_element` becomes much simpler using this.
+
+```cpp
+template <std::size_t I, typename... Ts>
+struct std::tuple_element<I, Tuple<Ts...>> {
+    static constexpr std::array types = {^^Ts...};
+    using type = [: types[I] :]
+}
+```
+
+### Underrated `index_sequence`
+
+When you do `std::make_index_sequence<3>{}`, you get `std::integer_sequence<size_t, 1, 2, 3>`.
+
+:::note
+I am not adding the discussion to replace `boost::mpl` stuff. If needed, I will look at it again. Something interesting that might come in handy for me later on was this part:
+
+```cpp
+std::vector args{^^T};
+for (T k = 0; k < N; k++)
+    args.push_back(std::meta_reflect_constant(k));
+auto ret = substitute(^^std::integer_sequence, args);
+```
+
+`substitute` will literally substitute the args into the template param pack of `std::integer_sequence`.
+:::
+
+We discuss three ways of doing a nice metaprogramming puzzle. If we ever need to dig into multiple ways of attacking these kinds of tasks, I will see it in detail, no notes for this for now thoug`:)`. Another example shown was the idea of having an internal unit system with compile time dimension checking.
+
+```cpp
+template <typename M, typename K, typename S> struct Unit {
+    enum {m=M, k=K, s=S};
+};
+
+template <typename Unit> struct Value {
+    double val;
+    explicit Value(double d) : val(d) {}
+}
+
+using Meter = Unit<1,0,0>;
+using Acceleration = Unit<1,0,-2>;
+//...
+```
+
+There is a discussion followed up on `Boost::hana` which treats types as first class objects for easier work on them! It's interesting, not something that I will need for a while though but good to know that this design choice exists.
+
+### Homework
+
+#### [HW8.3][1]
+
+Without using any metaprogramming library, solve the multiplication task for physical quantities.
+
+```cpp
+template <typename D1, typename D2>
+auto operator*(Value<D1> a, Value<D2> b) {
+    using D = /* What to do here */
+    return Value<D>{double(a) * double(b)};
+}
+```
+
+Done! Here's the answer using meta reflection, [Link to CE](https://godbolt.org/z/xn5M93YKq).
+
+#### [HW8.4][4]
+
+The input to your metaprogram is a tuple of types. It could be any tuple, not just `std::tuple`. Basically, you can specify a list of types somehow. The output is the stable sorted list!
+
+TBD.
+
+### Essential Reading
+
+#### Ben and Jason "constexpr all the things!", Cppcon 2017
+
+> The legendary talk that kicked everything off.
+
+#### Jason "consteval all the things?", ACCU 2025
+
+> The first 40 minutes are apparently boring, but the rest of it is good.
+
+## Lecture 12: Lambdas: Functors, closures, type erasure
+
+:::note
+I think this lecture is really fundamental and important on one of the more substantial topics in C++. I will most probably dig into this one more probably.
+:::
+
+Lambdas came to be in C++ intially as a simple way to write anonymous functors. lambdas with no capture can be decayed to function pointers.
+
+```cpp
+using atype = int(*)(int, int);
+atype adder = [](int x, int y) -> int { return x + y; };
+int x = adder(4, 2);
+```
+
+### On `std::invoke` and what really is "callable"
+
+To ask a rhetorical question, do we really need a lambda that is shown below?
+
+```cpp
+template <typename Range, typename Proj>
+void print_range(Range&& r, Proj&& p) {
+    for (auto e : r) {
+        std::cout << p(e) << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+std::vector<std::pair<int, int>> ps = { {1,2}, {3,4} };
+print_range(ps, [](const auto& e){ return e.second; });
+```
+
+My answer: You could just use plain old function pointers? Meanwhile, we go into `std::invoke` that can do any kind of callable. It takes a callable, and arguments and "figures out" how to call the callable on the arguments correctly.
+
+![`std::invoke` example on a complicated struct](image-17.png)
+
+Notice how passing a member pointer, and the struct translates the `std::invoke(psn, s)` call to `s.*psn`. Similarly, for a pointer to the member function it takes the pointer, the object and then all the arguments `std::invoke(psf, s, 1)` and translates it into `(s.*psf)(1)`. `S` also have an `operator()` defined, it is itself a callable. This is why doing `std::invoke(s, 1)` translates to `s(1)`.
+
+In fact, `S` also has the `operator pfunc_t()` defined, so calling the unary `+` operator invokes that to return `bar`. Which is defined as a static member function. `std::invoke(+s, 1)` translates to `S::bar(1)` and returns `5` as expected.
+
+To answer the earlier `print_range` question, notice how we were able to pass a member function pointer and `std::invoke` together? Since we wish to use `.second` which is a member function, we could simply pass the member function pointer to the `print_range` handler and use `std::invoke` internally!
+
+```cpp
+template <typename Range, typename Proj>
+void print_range(Range&& r, Proj&& p) {
+    for (auto e : r) {
+        std::cout << std::invoke(p, e) << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+std::vector<std::pair<int, int>> ps = { {1,2}, {3,4} };
+print_range(ps, &std::pair<int, int>::second);
+```
+
+:::tip
+To be TRULY generic, we never assume that `p(e)` covers all cases. If we wish to be truly generic, we need to consider all invocables and not just the ones that can be called through `operator()`
+:::
