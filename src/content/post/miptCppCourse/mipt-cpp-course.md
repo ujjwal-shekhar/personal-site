@@ -2,7 +2,7 @@
 title: "Notes from the Master's Course in C++ (MIPT, 2025-2026)"
 description: "An advanced deep dive into a lot of the C++ internals. I also work out all the assignments here."
 publishDate: "26 Oct 2025"
-updatedDate: "5 May 2026"
+updatedDate: "12 May 2026"
 tags: ["c++", "compilers", "lang-features"]
 pinned: true
 ---
@@ -3508,3 +3508,575 @@ print_range(ps, &std::pair<int, int>::second);
 :::tip
 To be TRULY generic, we never assume that `p(e)` covers all cases. If we wish to be truly generic, we need to consider all invocables and not just the ones that can be called through `operator()`
 :::
+
+There are ways of constraining lambdas with concepts too. But **beware**, this does NOT make the variable `inc` a function template.
+
+### Constraining lambdas
+
+```cpp
+auto inc = [](std::integral auto x) -> decltype(x) {
+    return x++;
+};
+
+auto t = inc(1); // int
+```
+
+The reason that this is even possible to begin with? The compiler doesn't template the type of the lambda, but only the call operator. It generators an internal closure type:
+
+```cpp
+struct __IncClosure {
+    template <std::integral T>
+    constexpr auto operator() (T x) const -> T {
+        return x++;
+    }
+};
+
+__IncClosure inc;
+decltype(inc) inc_again; // OK because inc is not a function templ!
+```
+
+In fact you can explicitly write these templated parameters without relying on the `auto` machinery. The `inc` case could be written as:
+
+```cpp
+auto inc = []<std::integral T>(T x) -> T {
+    return x++;
+};
+```
+
+This simply allows for even more flexibility and the power to add `requires` clauses into lambdas:
+
+```cpp
+auto add = []<typename T, typename U>
+    requires requires(T t, U u) { t + u; }
+    (T x, U y) { return x + y; };
+```
+
+`add` is not possible write with *only* the `auto` machinery, we can do so much more with template params attached on top of the lambda itself. You can still template the variable itself, because the language allows templated variables.
+
+```cpp
+template<typename T>
+auto ccast = [] (auto x) -> T { return (T)x; }; 
+
+double d = 1.5;
+auto i = ccast<int>(d);
+```
+
+Post C++20, you can also wrap the entire lambda in an unevaluated context.
+
+```cpp
+template <typename T>
+decltype([](auto x) -> T { return (T)x; }) ccast;
+```
+
+You could literally dereference a null-pointer inside the `decltype` and it would be allowed (until the underlying `operator()` is called ofcourse). Now, by extension of this logic, the lambda-expr itself can be `constexpr` even if the `operator()` is not `constexpr` itself (CCE objects only mean that can exist in compile-time storage right, the methods might not). However, the `operator()`, will be `constexpr` *if possible*.
+
+```cpp
+constexpr auto hello = []() { std::println("hello"); };
+hello(); // OK
+static_assert( [](){ return 42; }() == 42; ); // Also OK
+```
+
+### Captured lambdas
+
+When a capture is provided, a lambda-expr becomes a `struct` with a call operator. The generated `struct` is actually a fully fledged object.
+
+```cpp
+auto parm_adder = [a = 2, b = 3](int x, int y) {
+    return x * a + y * b;
+};
+
+// GENERATED STRUCT
+struct _Parm_Adder {
+    int a, b;
+    _Parm_Adder(int a_, int b_)
+        : a(a_), b(b_) {}
+    constexpr auto operator() (int x, int y) const{
+        return x * a + y * b;
+    }
+};
+
+/* parm_adder(2, 3); */
+```
+
+:::warning
+The `[a = 2, b = 3]` does NOT imply default arguments. It implies the construtor parameters used for the closure object as seen in the last line.
+:::
+
+By default, the call operator is `const`. To be able to operate on the captures, you must add `mutable` to the lambda. Moreover, it is recommended that you don't capture by reference and instead use the "reference capture by value" to properly signal to a future person reading the code that this was intended to be a reference value. This also prevents a lot of lifetime pitfalls of the capture by reference.
+
+```cpp
+// Mark mutable
+auto inc_cap = [&a](auto x) mutable { return x++ };
+
+// reference cap by val trick
+int b = 14;
+auto somth = [a = std::ref(b)]() { return a++; };
+auto i = somth(); // i = 15;
+i = somth(); // i = 16;
+```
+
+#### The refref problem in captures
+
+We can break the call operator into its "ref" and "refref" overloads for any struct.
+
+```cpp
+struct s {
+    std::vector<int> v;
+    std::vector<int>& operator() ()& { return v; }
+    std::vector<int>&& operator() ()&& { return std::move(v); }
+}
+
+S s;
+auto a = s(); // copied from
+auto b = std::move(s)(); // moved from
+```
+
+But how would we express this in a lambda?
+
+```cpp
+auto l = [vb = vector<int>{}]() { return /*what??*/; };
+std::vector<int> c = l();
+std::vector<int> d = std::move(l)();
+```
+
+To solve the problem of being able to deduce the right context of the return value, we have deducing `this` machinery now. In general, we replace manual overrides with a universal/forwarding reference.
+
+```cpp
+// OLD METHOD
+struct S {
+    auto foo const & {};
+    auto foo & {};
+    auto foo && {};
+}
+
+// NEW METHOD
+struct S {
+    template <typename Self>
+    auto foo(this Self&&);
+}
+```
+
+This makes the value category of the lambda closure object known INSIDE the body of the lambda-expr. However, even then we don't know the value category of the captured variable. We only know the value category of the field (cv-qualifications of the lambda-closure *should* be the same for the captured variables).
+
+```cpp
+auto l = [vb = std::vector<int>{}](this auto&& self) {
+    return std::forward</*what??*/>(vb);
+}
+```
+
+The final piece of the puzzle, `std::forward_like<...>(...)`. Basically it turns `std::forward_like<T>(u)` into `std::forward<like_t<T, decltype(u)>>(u)`. Where, `like_t<const int&, double>` returns `const double&`. Basically, *mimics* the cv-quals of the first arg onto the second.
+
+```cpp
+auto l = [vb = std::vector<int>{}](this auto&& self) {
+    return std::forward_like<decltype(self)>(vb);
+}
+```
+
+#### Currying
+
+It is the ability to partially substitute arguments to create new functions.
+
+```cpp
+auto add = [](auto x, auto y) { return x + y; };
+auto add4 = curry(add, 4);
+
+// Now we can do
+auto x = 5;
+auto x_plus_4 = add4(x);
+```
+
+We can use variadic captures to implement a `curry` function.
+
+```cpp
+template <typename Fun, typename... Args>
+auto curry(Fun fun, Args... args) { // Take all the "fixed" args
+    return [=](auto... rest) { // Take the "remaining" args
+        return fun(args..., rest...); // combine them in the original function
+    };
+}
+```
+
+:::important
+In the capture of a lambda, only the local non-static context is captured. An exercise on this:
+
+```cpp
+auto factory (int parameter) {
+    static int a = 0;
+    return [=] (int argument) {
+        static int b = 0;
+        a += parameter; b += argument;
+        return a + b;
+    };
+}
+
+auto func1 = factory(1); auto func2 = factory(2);
+std::cout << func1(20) << " "         // a=1, b=20 
+          << func1(30) << " "         // a=2, b=50
+          << func2(20) << " "         // a=4, b=20
+          << func2(30) << std::endl;  // a=6, b=50
+```
+
+My guess: `21 52 24 56`. WRONG. Even `func1` and `func2` share the same `b` because they simply only appear once in the source code! So the `a`s were correct, the `b`s are `20, 50, 70, 100`.
+:::
+
+### Side-track to `tuple`
+
+`std::tuple` allows us to store a pack of heterogenous types in itself. There are 5 ways to create a `tuple`:
+
+```cpp
+ctor;
+tuple<VTypes...> make_tuple(Types&&...);
+tuple<CTypes...> tuple_cat(Tuples&&...);
+tuple<Types&...> tie(Types&...);
+tuple<T&&...> forward_as_tuple(T&&...);
+```
+
+We also have automatic structured binding here, alongiwith `tie`.
+
+```cpp
+// Tie vars into a tuple
+int a{5}; double b{1.0};
+auto t = std::tie(a, b);
+
+// Untie vars back from a tuple
+int a; double b;
+std::tie(a, b) = make_tuple(1, 1.0);
+
+// Another syntax for this
+auto [a, b] = make_tuple(1, 1.0);
+```
+
+In fact, bindings wre so convenient that they got extended to arrays and and POD-structs.
+
+```cpp
+int a[2] = {2, 3};
+auto& [xr, yr] = a;
+xr = 4; // a[2] == {4, 3} now.
+
+struct s { int x; double y; };
+s = {1, 1.0};
+const auto& [xcr, ycr] = s; // const refs to s.x and s.y
+```
+
+Tuples can be treated as arguments and we can apply a callable to them.
+
+```cpp
+auto add = [](auto x, auto y) { return x + y; }
+auto x = std::apply(add, std::pair(1, 2));
+
+// Calls x = add(1, 2);
+```
+
+### Type erasure
+
+Lambdas could have the exact same interface, but with completely different closures (due to differences in their capture lists). Now, if lambdas could have virtual functions, there would be a common parent to dynamic dispatch on. However that option doesn't exist.
+
+The most basic form of type erasure comes in the form of `std::any`.
+
+```cpp
+// Behave like python???
+std::any a = 1;
+a = 3.14;
+
+a = Heavy(100); // Works, but performs an extra move/copy
+a = std::make_any<Heavy>(100); // better
+```
+
+A more constrained form of `std::any` is `std::variant`. More of a "type-safe" `union`.
+
+```cpp
+std::variant<int, float> v = 12;
+std::vector<std::variant<int, float, string>> v {
+    "v", 1, 2.00
+};
+```
+
+How do you iterate over a `std::vector` of `std::variant`s? We can use `std::visit` with each `variant` option and handle all cases by passing in a lambda. It is bad for maintenance and might require too much casework though.
+
+:::note
+`std::visit` is a C++17 utility used to apply a visitor (a callable object) to a `std::variant` at runtime, safely accessing its currently active type. It gives a compile-time error if all the types aren't handled.
+:::
+
+If only we could do "overloading" for lambda-expr as well. And we can use `make_overload`.
+
+```cpp
+auto f = make_overload(
+    [](int i){ print("forint"); }
+    [](double i){ print("fordbl"); }
+);
+
+f(3); // forint
+f(3.0); // fordbl
+```
+
+In fact, we don't even need `make_overload`. We can deduction hints and CTAD to make this work.
+
+```cpp
+template <typename... F>
+struct overload : F... { using F::operator()...; };
+
+template <class... Ts> overload(Ts...) -> overload<Ts...>;
+
+auto f = overload {
+    [](int i) { print("forint"); },
+    [](double i) { print("fordbl"); }
+};
+```
+
+This construct mechanism can be combined with `std::visit` to make it more ergonomic, and this looks almost like pattern-matching.
+
+```cpp
+for (auto& v : vec) {
+    std::visit(overload {
+        [](int i) { print("this is i"); },
+        [](string i) { /* Action for string */ }
+    }, v);
+}
+```
+
+Finally, we have the most famous example of type erasure, `std::function`. It stores any function with the given signature. So `std::function<int (int)>` can store all functions that accept an `int` arg and return an `int`. But just like `std::any`, internally, this just nicely wraps a `void *`. It stores the closure object on the heap, and thus the real type is seen at run-time.
+
+:::important
+Here, the second line involves a heap indirection (unless SBO happens). The normal `closure` is a tiny, cheap, (usually) stack variable.
+
+```cpp
+auto closure = [x](int a) { return x - a; };
+std::function<int (int)> func = [x](int a) { return x - a; };
+```
+
+:::
+
+Now, why do recursive lambdas fail if we don't use type erasure? Because the body of the function tries to capture an incomplete type. Inside the `std::function` the call is a runtime dispatch, when the type is already known.
+
+```cpp
+std::function<int (int)> fact = [&](int i) {
+    return (i == 1) ? 1 : (fact(i - 1) * i);
+}; // works
+
+auto fact = [&](int t) {
+    return (i == 1) ? 1 : (fact(i - 1) * i);
+}; // doesn't work
+```
+
+But now, we can make it work using `deducing this`. This yields empty captures and works using a simple closure type. This is because `self` is not a capturing variable, it is simply an argument. The compiler doesn't need to know the full type until the point it gets invoked. That is when `this auto&&` kicks in and tells the compiler that `self` is `fact`, and at that point, `fact` is already fully defined.
+
+```cpp
+auto fact = [](this auto&& self, int t) {
+    return (i == 1) ? 1 : (self(i - 1) * i);
+};
+```
+
+### Homework
+
+TBD: It is a compiler behaviour difference question.
+
+### Extra Reading
+
+#### Braden Ganetsky: Lambda all the things, CppNow 2025
+
+#### Ben Deane: Deducing this patterns, CppCon 2021
+
+#### Timur Doumler: C++ lambda idioms, CppCon 2022
+
+## Lecture 13 + 14: Ranges
+
+:::warning
+I will skip these for now, I would like to get into more runtime related discussions. This dicusses: ranges, views, adaptors, niebloids, CRTP, iterators, factories. They are important surely, but more of a "modern safety and ergonomics" kind of feature. The next chapters (esp. Allocators, Atomics) are much more "core C++" which needs deeper dives.
+:::
+
+## Lecture 15 + 16: Allocators
+
+In C and C-like languages, the word "allocator" refers to the mechanism that implements the global `malloc()` and `free()` calls. Examples are:
+
+- `ptmalloc`: Default one used (or through the `-lc` flag).
+- `jemalloc`: More advanced for various reasons, used by Meta, Mozilla; etc. (flag: `-ljemalloc`).
+- `tcmalloc`, `tbbmalloc`, `mimalloc`: Allocators from Google, Intel and Microsoft. (flag like: `-ltcmalloc`).
+
+These "global" allocators deal with all the dirty work: managing the heap, dealing with fragmentation, calling `brk`/`sbrk`, returning memory blocks, returning `nullptr` for failed calls.
+
+:::important
+We will not study the "global" allocators! C++ allocators are an abstraction layer for our containers, and they came up much later compared to various `malloc()` implementations.
+
+We will return to the global allocators when studying concurrency, because the memory is a global shared resource in a multi-threaded program.
+:::
+
+### Motivation
+
+In C++98, we already had a good enough customization point for controlling heap memory allocation by overriding the `::operator new()`. The original `vector` author, Stepanov, intended for allocators to become an abstraction layer over the far and near pointers (old design).
+
+A container uses the allocator, which knows two things:
+
+- Where to obtain memory
+- How to convert this to `T*`
+
+Thus, they aren't the actual memory allocation mechanism, they are an adapter to the underlying allocator (global ones). A basic form of allocator might look like:
+
+```cpp
+template <typename T>
+struct s_alloc {
+    typedef T value_type;
+    typedef T* pointer_type;
+    pointer_type allocate(size_t n) {
+        return static_cast<pointer_type>(my_malloc(n * sizeof(value_type)));
+    }
+    void deallocate(pointer_type p, size_t n) {
+        my_free(p);
+    }
+};
+```
+
+### C++98 requirements from an allocator
+
+But this is problematic. How would the following work in this case?
+
+```cpp
+vector<int, s_alloc<int>> v1, v2;
+/*
+ *
+ *
+ */
+v1 = v2;  /// What now???
+// Should v1 reuse memory already alloc'ed by v2
+// Should v1 deallocate everything and realloc using 
+// its own alloc instance? Is it okay for alloc1 to
+// dealloc something alloc'ed by alloc2??
+```
+
+This is the problem of **allocator interchangability**. Now, the other problem is that in something like `std::list<T, s_alloc<T>>` the list does not allocate, but `__list_node<T>` does. But then how do we make `s_alloc<__list_node<T>>` available, which is a completely different type? This is the problem of **allocator rebinding**.
+
+The C++98 has an agressive solution to the problem of interchangability.
+
+:::important[C++98 Solution to Allocator Interchangeability]
+All concrete instances of any allocator type are equivalent.
+
+```cpp
+template <typename T>
+bool operator==(const s_alloc<T>&, const s_alloc<T>&) {
+    return true;
+}
+
+template <typename T>
+bool operator!=(const s_alloc<T>&, const s_alloc<T>&) {
+    return false;
+}
+```
+
+:::
+
+For the allocator rebinding problem, the C++98 mandates a `rebind` and typecast, while keeping the rest of the things the same
+
+:::important[C++98 Solution to Allocator Rebinding]
+
+```cpp
+template <typename T>
+struct s_alloc {
+    // Everything else is the same
+    
+    template <typename U> s_alloc (const s_alloc<U>& other) {}
+
+    template <typename U>
+    struct rebind { typedef s_alloc<U> other; };
+};
+```
+
+:::
+
+This is not all, you were also required to provide `construct` and `destroy` functions.
+
+```cpp
+void construct(pointer_type p, const value_type& t) {
+    new (p) T(t);
+}
+
+void destroy(pointer_type p) {
+    p->~T();
+}
+```
+
+And a lottt more. All of this was deprecated in 2017 and much of it got moved to traits in 2011.
+
+### Bloomberg's push to more modern (C++11) allocators
+
+Stateful allocators were not possible because all given allocator types were required to compare equal to each other. Smart pointers got prohibited because the `typedef` members like `ptrdiff_t` etc, were also required. This was extremely restrictive, and people were not happy.
+
+First, custom equality for allocators was introduced. Two allocators would compare equal, if memory allocated by one, could be deallocated by the other.
+
+Second, allocators were allowed to have pointer types other than `T*`.
+
+Third, `allocator_traits` and `pointer_traits` were introduced to collect all the rarely customized pieces, and provide reasonable defaults and reduce boilerplate. It contains stuff like `value_type`, `pointer_type` etc. `rebind_alloc`, `propagate_on_xxx`, `allocate` and `deallocate` functions as well.
+
+#### Alloc and Construct are quite different
+
+If we allow custom pointer types, then `allocate()` would return a `pointer` (custom) type. But `construct()` must work with `T*`, a raw pointer. The standard solves this by checking if the `allocator_traits` provide a custom `construct`. If not, it falls back on reasonable defaults.
+
+```cpp
+template <typename Alloc> class allocator_traits {
+    static pointer allocate(Alloc& a, size_t n) {
+        return a.allocate(n);
+    }
+
+    tempalte<typename T, typename... Args>
+    static void construct(Alloc&a, T* p, Args&&... args) {
+        if constexpr (/*check a.construct exists*/) {
+            a.construct(p, forward<Args>(args)...);
+        } else {
+            new (static_cast<void*>(p)) T(forward<Args>(args)...);
+        }
+    }
+}
+
+```
+
+Thus, `construct` would work with raw memory (think, `vector.reserve(100)` only grabbing raw uninitialized memory for 100 items). Only when an actual `vector.push_back()` happens do we need to actually `construct` the object in that location. Most people would only customize the `construct` part and not bother writing the tedious boilerplate part. This is why `allocator_traits<>` exist, to bridge the gap.
+
+### Case: Free list allocator
+
+Make an allocator that returns freed blocks to a "free list" (not the global allocator). This is highly optimized for frequent insertions and removals. Basically:
+
+```cpp
+list<int, freelist_alloc<int>> l(v.begin(), v.end());
+
+// No actual deallocations happen!
+l.remove(2);
+l.remove(6);
+
+// No actual allocations happen either!
+l.insert(l.begin(), -1);
+l.insert(l.begin(), -2);
+```
+
+#### The alignment problem
+
+If we intend to first raw bytes with the intent to later construct a `struct S` in there, `new char[]` doesn't guarantee alignment even if the `struct S` requires it.
+
+```cpp
+// S must have a mem addr that is a
+// multiple of 32 (e.g.: 0x1000, 0x1020)
+struct alignas(32) S { int x; };
+constexpr auto sz = sizeof(S);
+
+// Get the raw bytes as char[]
+// WRONG: char needs 1-byte alignment
+// So, rawmem might be something like 
+// 0x1098, which isn't valid for S
+char *rawmem = new char[sz];
+
+// This could be UB because of this
+return static_cast<S*>(rawmem);
+```
+
+To fix this, we use the aligned `new` and `delete`:
+
+```cpp
+constexpr auto Salgn = static_cast<std::align_val_t>(alignof(S))
+
+char *rawmem2 = new (Salgn) char[sz]; // Works now!
+return static_cast<S*>(rawmem2); // No UB
+delete [] rawmem2; // Use the matching delete[] call
+```
+
+Now, this still isn't perfect since information for the `new[]` operator makes it store the size of the array as well on the heap. While using aligned `new`/`delete` makes it correct, we will see in future `aligned ::operator new()`.
+
+#### Freelist resource of `T`
+
+Before writing the allocator, we separate the actual free-list into a different data structure.
