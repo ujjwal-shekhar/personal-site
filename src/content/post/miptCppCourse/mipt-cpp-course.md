@@ -2,7 +2,7 @@
 title: "Notes from the Master's Course in C++ (MIPT, 2025-2026)"
 description: "An advanced deep dive into a lot of the C++ internals. I also work out all the assignments here."
 publishDate: "26 Oct 2025"
-updatedDate: "12 May 2026"
+updatedDate: "21 May 2026"
 tags: ["c++", "compilers", "lang-features"]
 pinned: true
 ---
@@ -4079,4 +4079,193 @@ Now, this still isn't perfect since information for the `new[]` operator makes i
 
 #### Freelist resource of `T`
 
-Before writing the allocator, we separate the actual free-list into a different data structure.
+Before writing the allocator, we separate the actual free-list into a different data structure, a singly linked list. An interesting trick is to store the "next" pointer as contents of the head:
+
+```cpp
+void* head = nullptr;
+
+void push(void *next) {
+    // when a memory block is freed
+    // we prepend the new block. First
+    // Store the old head in void* p
+    *static_cast<void**>(next) = head;
+
+    // Update the global head to p
+    head = next;
+}
+
+void* pop() {
+    // When a memory block is requested
+    // first use pointer chasing to
+    // find the next element
+    void* next = head;
+    if (!next) return nullptr;
+
+    // Update the head to next
+    head = *static_cast<void**>(next);
+    
+    // return the old head
+    return next;
+}
+```
+
+The design is elegant, because there is no allocation needed here. If the free-list becomes empty, we return `nullptr` and fallback on allocation inside the actual allocator. But as long there is an old memory block waiting on someone to use it, we can overwrite its first 8 bytes to point to the "next" block. Now, the caveat is that **the block must be large enough to hold a pointer**. Thus:
+
+```cpp
+static constexpr std::size_t kBlockSize =
+    (sizeof(T) < sizeof(void*)) ? sizeof(void*) : sizeof(T);
+
+static constexpr std::size_t kBlockAlign =
+    (alignof(T) < alignof(void*)) ? alignof(void*) : alignof(T);
+
+static constexpr std::align_val_t kAlignVal = static_cast<std::align_val_t>(kBlockAlign);
+
+// If the freelist runs out of blocks, fallback
+void* alloc_heap() {
+    // The two params ensure that the size of block
+    // returned, AND the alignment is good enough
+    // for the most "restrictive" of void* and T.
+    return ::operator new(kBlockSize, kBlockAlign);
+}
+```
+
+Now, this makes the allocator completely non-interchangeable for different `T`, of course. But what about same `T`? Also, for `std::list<int, freelist_alloc<int>>`, the internal `__list_node` will rebind the allocator to a `freelist_alloc<__list_node<int>>`, creating a rebind alloc from scratch, and clear the freelist each time!
+
+An attempt to fix this, would be to have a shared freelist. One, that treats all instances of a memory block as the same, if their size is the same.
+
+```cpp
+class freelist_resource {
+    std::unordered_map<std::size_t, void*> heads;
+
+public:
+    void* pop(std::size_t bytes) noexcept {
+        // Do we have free blocks for this size?
+        auto it = heads.find(bytes);
+        if (it == nullptr || it.second == nullptr)
+            return nullptr; // No we don't
+
+        // Yes we do, pop the head and use
+        void* p = it->second;
+        it->second = *reinterpret_cast<void**>(p);
+        return p;
+    }
+};
+```
+
+But still, the rebind problem persists. How do we prevent the destruction of the freelist for each rebind? The only solution is to track the ownership. The actual allocator then tracks if it actually owns the resource.
+
+```cpp
+template <typename T>
+class freelist_alloc {
+    freelist_resource* res_;
+    bool owned_;
+
+public:
+    // Invoker of the default constructor is the true owner
+    freelist_alloc()
+        : res_(new freelist_resource), owned_(true) {};
+
+    // Invoker of the copy construction is not the true owner
+    freelist_alloc(const freelist_alloc& other) noexcept
+        : res_(other.res_), owned_(false) {};
+    
+    // Rebind construction is also NOT true ownership
+    template <typename U>
+    freelist_alloc(const freelist_alloc<U>& other) noexcept
+        : res_(other.res_), owned_(false) {};
+};
+```
+
+This is a little weird, the copy construction is not *really* yielding a copy of the original object. In fact, equality of two allocators now depends on whether the resource is the same.
+
+```cpp
+bool operator==(const freelist_alloc& a, const freelist_alloc& b) const noexcept {
+    return a.res_ == b.res_;
+}
+
+bool operator!=(const freelist_alloc& a, const freelist_alloc& b) const noexcept {
+    return !(a == b);
+}
+```
+
+This is extremely non-trivial behaviour. To expose how exactly the allocator behaves on copy or move, the following typedefs are defined post C++11. They are intentionally so verbose is look odd. If you change this from the default `false_type`; you should REALLY know what you are doing, because this changes semantics.
+
+![Ugly POCCA, POCMA, POCS, IAE typedefs from C++11](image-18.png)
+
+These `typedef`s for our freelist would be:
+
+- POCCA : false. `l1 = l2` should not propagate the same allocator.
+- POCMA : true. `l1 = std::move(l2)` should definitely propagate the same allocator.
+- POCS  : true. `std::swap(l1, l2)` similar.  
+- IAE   : false. Of course, because we have a stateful allocator that is tracking ownerships! It is not always equal for the same type.
+
+There is yet another idea, where we completely separate out the `freelist_resource` out of the allocator. A pointer to the resource is passed to the container which then wires it into the allocator. They are all called local allocators.
+
+```cpp
+std::list<int, freelist_alloc<int>> l1{&r1}, l2{&r2};
+// Notice that the allocators are now non-owning!
+
+l1 = l2; // Absolutely don't propagate, POCCA = false
+l1 = std::move(l2); // Same thing, POCMA = false
+std::swap(l1, l2); // Same thing, POCS = false
+```
+
+### Case Study: Arena + Small Alloc
+
+Small buffer optimization in a `vector` was proposed by Howard Hinnant. The design will include an arena resource that will be externally manged.
+
+```cpp
+template <size_t N, size_t alignment = alignof(max_align_t)>
+class arena {
+    char buf_[N] alignas(alignment);
+    chat *ptr_;
+
+public:
+    arena() noexcept : ptr_(buf) {}
+
+    // Cannot copy this
+    arena(const arena& other) = delete;
+    arena& operator=(const arena& other) = delete;
+
+    template <size_t ReqAlign> char* allocate();
+    void deallocate(char* p, size_t n) noexcept;
+};
+```
+
+For the `allocate()` function, we will use the buffer when possible and fallback on global `new` otherwise.
+
+```cpp
+template <size_t N, size_t aligment = alignof(max_align_t)>
+template <size_t ReqAlign>
+char* arena<N, alignment>::allocate(size_t bytes) {
+    const auto round_up_bytes = alignup(bytes);
+    
+    // buf_ + N is the end of buffer, subtract ptr_
+    // to get what remains
+    const auto remaining_buffer = buf_ + N - ptr_;
+    if (remaining_buffer < round_up_bytes) {
+        // Not enough left in buffer, fallback
+        return static_cast<char*>(::operator new(bytes, round_up_bytes));
+    }
+
+    char* retval_ = ptr_;
+    ptr_ += round_up_bytes;
+    return retval_;
+}
+```
+
+We use the `short_alloc` as an adaptor to our underlying arena. This binds a specific arena to the allocator interface.
+
+```cpp
+template <class T, size_t N, size_t A = alignof(max_align_t)>
+class short_alloc {
+    arena<N, A> a_; // This is the underlying
+
+public:
+    short_alloc(arena_type& a) noexcept : a_(a) {}
+    T* allocate(size_t n) {
+        char* res = a_.allocate<alignof(T)>(n * sizeof(T));
+        return reinterpret_cast<T*>(res);
+    }
+};
+```
