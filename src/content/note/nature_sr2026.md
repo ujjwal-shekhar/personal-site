@@ -1,5 +1,5 @@
 ---
-title: "Nature SR '26 Paper"
+title: "Nature SCi. Rep. '26 Paper"
 description: "pinion-driven vaccination and epidemic dynamics on heterogeneous networks"
 publishDate: "2026-06-01T10:00:00Z"
 ---
