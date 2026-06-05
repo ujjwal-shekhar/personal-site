@@ -1,7 +1,7 @@
 ---
 title: "Codecraft '26 on Codeforces"
 description: "Actively worked on the Codecraft contest help on Codeforces."
-publishDate: "2024-04-07T15:30:00Z"
+publishDate: "2026-04-07T15:30:00Z"
 ---
 
 Was in the core team and a problem author for the [Codeforces Round #1091](https://codeforces.com/blog/entry/152708), a.k.a. **Codecraft '26**.
