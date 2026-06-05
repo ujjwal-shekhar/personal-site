@@ -1,5 +1,5 @@
 ---
-title: "Winning Megathon 2023"
+title: "Winning Megathon '23"
 description: "Paddy field detection from satellite imagery"
 publishDate: "2023-10-01T10:00:00Z"
 ---

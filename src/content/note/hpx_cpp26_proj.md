@@ -1,5 +1,5 @@
 ---
-title: "The HPX Project"
+title: "Open source w/ The HPX Project"
 description: "Open Source Contribution"
 publishDate: "2026-03-15T10:00:00Z"
 ---

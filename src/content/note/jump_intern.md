@@ -1,5 +1,5 @@
 ---
-title: "Jump Trading"
+title: "Interned @ Jump Trading (+PPO)"
 description: "Summer internship, C++"
 publishDate: "2025-08-20T10:00:00Z"
 ---

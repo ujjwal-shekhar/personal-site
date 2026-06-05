@@ -1,5 +1,5 @@
 ---
-title: "Google Summer of Code"
+title: "Open source w/ Google Summer of Code"
 description: "2× compile-time speedups for 10M+ lines of hardware code"
 publishDate: "2024-09-10T10:00:00Z"
 ---

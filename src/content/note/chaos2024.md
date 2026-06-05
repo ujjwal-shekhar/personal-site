@@ -1,5 +1,5 @@
 ---
-title: "Chaos ’24 Paper"
+title: "Chaos '24 Paper"
 description: "Impact of Diffusion on synchronization pattern of epidemics in nonidentical metapopulation networks"
 publishDate: "2024-11-05T10:00:00Z"
 ---

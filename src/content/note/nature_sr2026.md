@@ -1,6 +1,6 @@
 ---
-title: "Nature SCi. Rep. '26 Paper"
-description: "pinion-driven vaccination and epidemic dynamics on heterogeneous networks"
+title: "Nature Sci. Rep. '26 paper"
+description: "Opinion-driven vaccination and epidemic dynamics on heterogeneous networks"
 publishDate: "2026-06-01T10:00:00Z"
 ---
 
